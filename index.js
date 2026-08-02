@@ -17,25 +17,38 @@ app.get('/', async (req, res) => {
                                             }
                                                 });
 
-                                                    // استخدام أقصى ضغط ممكن مع الحفاظ على النص مقروءاً
-                                                        const compressedBuffer = await sharp(response.data)
-                                                              .resize({ width: 600, fit: 'inside', withoutEnlargement: true }) // العرض 600px أقصى توفير مع وضوح النص
-                                                                    .grayscale() // إزالة الألوان لتقليل بيانات الصورة
-                                                                          .jpeg({ 
-                                                                                  quality: 15, // دقة 15% (أقل دقة مقروءة)
-                                                                                          mozjpeg: true, // استخدام خوارزمية ضغط فائقة
-                                                                                                  chromaSubsampling: '4:2:0'
-                                                                                                        })
-                                                                                                              .toBuffer();
+                                                    // قراءة الجودة القادمة من التطبيق (الافتراضي 40 إذا لم تحدد)
+                                                        const quality = parseInt(req.query.q) || 40;
 
-                                                                                                                  res.set('Content-Type', 'image/jpeg');
-                                                                                                                      res.set('Cache-Control', 'public, max-age=86400');
-                                                                                                                          res.send(compressedBuffer);
-                                                                                                                            } catch (err) {
-                                                                                                                                console.error('Proxy Error:', err.message);
-                                                                                                                                    res.status(500).send('Error processing image');
-                                                                                                                                      }
-                                                                                                                                      });
+                                                            let imagePipeline = sharp(response.data);
 
-                                                                                                                                      module.exports = app;
-                                                                                                                                      
+                                                                // التحكّم بالأبعاد ديناميكياً بناءً على الجودة المحددة في التطبيق
+                                                                    if (quality <= 20) {
+                                                                          // ضغط قوي جداً للمواقف التي تحتاج توفير أقصى للبيانات
+                                                                                imagePipeline = imagePipeline.resize({ width: 720, fit: 'inside', withoutEnlargement: true });
+                                                                                    } else if (quality <= 50) {
+                                                                                          // ضغط متوسط وموزون (ممتاز للمانهوا والمانجا اليومية)
+                                                                                                imagePipeline = imagePipeline.resize({ width: 1080, fit: 'inside', withoutEnlargement: true });
+                                                                                                    }
+                                                                                                        // إذا كانت الجودة أعلى من 50%، سيترك أبعاد الصورة الأصلية كما هي بدون تصغير
+
+                                                                                                            // معالجة الضغط مع الحفاظ على الألوان الأصلية
+                                                                                                                const compressedBuffer = await imagePipeline
+                                                                                                                      .jpeg({ 
+                                                                                                                              quality: quality, 
+                                                                                                                                      mozjpeg: true,
+                                                                                                                                              chromaSubsampling: quality <= 30 ? '4:2:0' : '4:4:4' // ضغط ألوان أعمق فقط عند اختيار جودة منخفضة
+                                                                                                                                                    })
+                                                                                                                                                          .toBuffer();
+
+                                                                                                                                                              res.set('Content-Type', 'image/jpeg');
+                                                                                                                                                                  res.set('Cache-Control', 'public, max-age=86400');
+                                                                                                                                                                      res.send(compressedBuffer);
+                                                                                                                                                                        } catch (err) {
+                                                                                                                                                                            console.error('Proxy Error:', err.message);
+                                                                                                                                                                                res.status(500).send('Error processing image');
+                                                                                                                                                                                  }
+                                                                                                                                                                                  });
+
+                                                                                                                                                                                  module.exports = app;
+                                                                                                                                                                                  
