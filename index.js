@@ -1,68 +1,119 @@
 const express = require('express');
 const axios = require('axios');
 const sharp = require('sharp');
+const http = require('http');
+const https = require('https');
 
 const app = express();
 
-app.get('/', async (req, res) => {
-  const imageUrl = req.query.url;
-    if (!imageUrl) return res.status(200).send('Proxy Server is Active & Ready!');
+// إعداد عميل Axios مع تفعيل keepAlive لسرعة الطلبات
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50 });
 
-      try {
-          const response = await axios.get(imageUrl, {
-                responseType: 'arraybuffer',
-                      timeout: 10000,
-                            headers: {
-                                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-                                            'Referer': new URL(imageUrl).origin
-                                                  }
-                                                      });
+const axiosInstance = axios.create({
+  timeout: 8000, // تقليل وقت الانتظار إلى 8 ثوانٍ لتفادي المعالجة الطويلة للروابط الميتة
+    responseType: 'arraybuffer',
+      httpAgent,
+        httpsAgent,
+          headers: {
+              'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+                  'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+                      'Accept-Encoding': 'gzip, deflate, br'
+                        }
+                        });
 
-                                                          const rawQuality = req.query.q || req.query.quality || req.query.l || req.headers['x-image-quality'];
-                                                              let quality = rawQuality ? parseInt(rawQuality, 10) : 40;
+                        // إنتاج صورة سوداء بديلة بحجم متناهي الصغر (1 كيلوبايت) لمنع الـ Loop
+                        async function getFallbackImage() {
+                          return await sharp({
+                              create: {
+                                    width: 400,
+                                          height: 600,
+                                                channels: 3,
+                                                      background: { r: 15, g: 15, b: 15 } // لون رمادي داكن / أسود
+                                                          }
+                                                            })
+                                                              .jpeg({ quality: 10 })
+                                                                .toBuffer();
+                                                                }
 
-                                                                  if (isNaN(quality)) quality = 40;
-                                                                      quality = Math.max(10, Math.min(100, quality));
+                                                                app.get('/', async (req, res) => {
+                                                                  const imageUrl = req.query.url;
+                                                                    if (!imageUrl) {
+                                                                        return res.status(200).send('v1.0-MaxPerformance Proxy Active');
+                                                                          }
 
-                                                                          let pipeline = sharp(response.data);
+                                                                            try {
+                                                                                // 1. جلب الصورة من المصدر الأصلي
+                                                                                    const response = await axiosInstance.get(imageUrl, {
+                                                                                          headers: {
+                                                                                                  'Referer': new URL(imageUrl).origin
+                                                                                                        }
+                                                                                                            });
 
-                                                                              // تطبيق فكرتك: إزالة الألوان وتطبيق أقصى ضغط فقط عند تحديد 10%
-                                                                                  if (quality <= 15) {
-                                                                                        pipeline = pipeline
-                                                                                                .resize({ width: 600, fit: 'inside', withoutEnlargement: true })
-                                                                                                        .grayscale() // إزالة الألوان للضغط الأقصى (أقل من 1 ميجا)
-                                                                                                                .jpeg({ quality: 10, mozjpeg: true, chromaSubsampling: '4:2:0' });
+                                                                                                                // 2. معالجة وتحديد متغيرات الضغط
+                                                                                                                    const rawQuality = req.query.q || req.query.quality || req.query.l || req.headers['x-image-quality'];
+                                                                                                                        let quality = rawQuality ? parseInt(rawQuality, 10) : 40;
 
-                                                                                                                    } else if (quality <= 35) {
-                                                                                                                          // ضغط قوي مع إبقاء الألوان
-                                                                                                                                pipeline = pipeline
-                                                                                                                                        .resize({ width: 750, fit: 'inside', withoutEnlargement: true })
-                                                                                                                                                .jpeg({ quality: quality, mozjpeg: true, chromaSubsampling: '4:2:0' });
+                                                                                                                            if (isNaN(quality)) quality = 40;
+                                                                                                                                quality = Math.max(1, Math.min(100, quality));
 
-                                                                                                                                                    } else if (quality <= 65) {
-                                                                                                                                                          // ضغط متوازن وألوان ممتازة للمانهوا (الإعداد اليومي الموصى به)
-                                                                                                                                                                pipeline = pipeline
-                                                                                                                                                                        .resize({ width: 1050, fit: 'inside', withoutEnlargement: true })
-                                                                                                                                                                                .jpeg({ quality: quality, mozjpeg: true, chromaSubsampling: '4:2:0' });
+                                                                                                                                    const isGrayscale = req.query.bw === '1' || req.query.bw === 'true' || req.query.grayscale === '1';
+                                                                                                                                        const targetWidth = Math.round(450 + (quality / 100) * 900);
 
-                                                                                                                                                                                    } else {
-                                                                                                                                                                                          // جودة فائقة وأبعاد كاملة
-                                                                                                                                                                                                pipeline = pipeline
-                                                                                                                                                                                                        .resize({ width: 1400, fit: 'inside', withoutEnlargement: true })
-                                                                                                                                                                                                                .jpeg({ quality: quality, mozjpeg: true, chromaSubsampling: '4:4:4' });
-                                                                                                                                                                                                                    }
+                                                                                                                                            // 3. بناء خط المعالجة (Sharp Pipeline)
+                                                                                                                                                let pipeline = sharp(response.data, { failOn: 'none', fastShrinkOnLoad: true })
+                                                                                                                                                      .rotate()
+                                                                                                                                                            .resize({
+                                                                                                                                                                    width: targetWidth,
+                                                                                                                                                                            fit: 'inside',
+                                                                                                                                                                                    withoutEnlargement: true,
+                                                                                                                                                                                            fastShrinkOnLoad: true
+                                                                                                                                                                                                  });
 
-                                                                                                                                                                                                                        const compressedBuffer = await pipeline.toBuffer();
+                                                                                                                                                                                                      if (isGrayscale) {
+                                                                                                                                                                                                            pipeline = pipeline.grayscale();
+                                                                                                                                                                                                                }
 
-                                                                                                                                                                                                                            res.set('Content-Type', 'image/jpeg');
-                                                                                                                                                                                                                                res.set('Cache-Control', 'public, max-age=604800, immutable');
-                                                                                                                                                                                                                                    return res.status(200).send(compressedBuffer);
+                                                                                                                                                                                                                    pipeline = pipeline.jpeg({
+                                                                                                                                                                                                                          quality: quality,
+                                                                                                                                                                                                                                mozjpeg: true,
+                                                                                                                                                                                                                                      progressive: true,
+                                                                                                                                                                                                                                            chromaSubsampling: isGrayscale ? '4:2:0' : (quality < 50 ? '4:2:0' : '4:4:4'),
+                                                                                                                                                                                                                                                  trellisQuantisation: true,
+                                                                                                                                                                                                                                                        overshootDeringing: true
+                                                                                                                                                                                                                                                            });
 
-                                                                                                                                                                                                                                      } catch (err) {
-                                                                                                                                                                                                                                          console.error('Proxy Error:', err.message);
-                                                                                                                                                                                                                                              return res.status(500).send('Error processing image');
-                                                                                                                                                                                                                                                }
-                                                                                                                                                                                                                                                });
+                                                                                                                                                                                                                                                                const compressedBuffer = await pipeline.toBuffer();
 
-                                                                                                                                                                                                                                                module.exports = app;
-                                                                                                                                                                                                                                                
+                                                                                                                                                                                                                                                                    res.set({
+                                                                                                                                                                                                                                                                          'Content-Type': 'image/jpeg',
+                                                                                                                                                                                                                                                                                'Content-Length': compressedBuffer.length,
+                                                                                                                                                                                                                                                                                      'Cache-Control': 'public, max-age=31536000, immutable',
+                                                                                                                                                                                                                                                                                            'X-Proxy-Version': '1.0-MaxPerformance'
+                                                                                                                                                                                                                                                                                                });
+
+                                                                                                                                                                                                                                                                                                    return res.status(200).send(compressedBuffer);
+
+                                                                                                                                                                                                                                                                                                      } catch (err) {
+                                                                                                                                                                                                                                                                                                          console.error('Image Fetch Error (Serving Fallback):', err.message);
+
+                                                                                                                                                                                                                                                                                                              try {
+                                                                                                                                                                                                                                                                                                                    // إرجاع الصورة السوداء الخفيفة فوراً لمنع التكرار وإغلاق الطلب بسلام
+                                                                                                                                                                                                                                                                                                                          const fallbackBuffer = await getFallbackImage();
+                                                                                                                                                                                                                                                                                                                                
+                                                                                                                                                                                                                                                                                                                                      res.set({
+                                                                                                                                                                                                                                                                                                                                              'Content-Type': 'image/jpeg',
+                                                                                                                                                                                                                                                                                                                                                      'Content-Length': fallbackBuffer.length,
+                                                                                                                                                                                                                                                                                                                                                              'Cache-Control': 'public, max-age=86400', // حفظ في الكاش ليوم واحد فقط
+                                                                                                                                                                                                                                                                                                                                                                      'X-Proxy-Status': 'Fallback-Image'
+                                                                                                                                                                                                                                                                                                                                                                            });
+
+                                                                                                                                                                                                                                                                                                                                                                                  return res.status(200).send(fallbackBuffer);
+                                                                                                                                                                                                                                                                                                                                                                                      } catch (fallbackErr) {
+                                                                                                                                                                                                                                                                                                                                                                                            return res.status(500).send('Critical Error');
+                                                                                                                                                                                                                                                                                                                                                                                                }
+                                                                                                                                                                                                                                                                                                                                                                                                  }
+                                                                                                                                                                                                                                                                                                                                                                                                  });
+
+                                                                                                                                                                                                                                                                                                                                                                                                  module.exports = app;
+                                                                                                                                                                                                                                                                                                                                                                                                  
