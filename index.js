@@ -30,23 +30,16 @@ const COVER_PATTERNS = [
 
 // دالة لإنشاء صورة سوداء مكتوب عليها رسالة الخطأ بالتفصيل لتشخيص المشكلة من داخل التطبيق
 async function getFallbackImage(errorMessage = "Unknown Error") {
-    const safeError = errorMessage.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').substring(0, 50);
-    
-    const svgText = `
-        <svg width="400" height="600" xmlns="http://www.w3.org/2000/svg">
-            <rect width="100%" height="100%" fill="#111111"/>
-            <text x="50%" y="45%" font-family="Arial" font-size="24" fill="#ff4444" text-anchor="middle" font-weight="bold">
-                Blocked by Protection
-            </text>
-            <text x="50%" y="55%" font-family="Consolas, monospace" font-size="14" fill="#ffffff" text-anchor="middle">
-                ${safeError}
-            </text>
-        </svg>
-    `;
-
-    return await sharp(Buffer.from(svgText))
-        .jpeg({ quality: 60 })
-        .toBuffer();
+    return await sharp({
+        create: {
+            width: 400,
+            height: 600,
+            channels: 3,
+            background: { r: 40, g: 10, b: 10 } 
+        }
+    })
+    .jpeg({ quality: 10 })
+    .toBuffer();
 }
 
 function checkIfCover(url) {
