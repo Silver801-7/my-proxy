@@ -13,6 +13,9 @@ const httpsAgent = new https.Agent({
     rejectUnauthorized: false
 }); 
 
+// الـ User-Agent الخاص بتطبيقك مباشرة
+const APP_USER_AGENT = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36';
+
 const axiosInstance = axios.create({
     timeout: 15000, 
     responseType: 'arraybuffer',
@@ -28,8 +31,7 @@ const COVER_PATTERNS = [
     'cover_url', 'thumbnail_url'
 ]; 
 
-// دالة لإنشاء صورة سوداء مكتوب عليها رسالة الخطأ بالتفصيل لتشخيص المشكلة من داخل التطبيق
-async function getFallbackImage(errorMessage = "Unknown Error") {
+async function getFallbackImage() {
     return await sharp({
         create: {
             width: 400,
@@ -50,13 +52,14 @@ function checkIfCover(url) {
 app.get('/', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) {
-        return res.status(200).send('v1.6-SmartProxy Active (Diagnostics Mode)');
+        return res.status(200).send('v1.7-SmartProxy Active (App UA Linked)');
     } 
 
     try {
+        // دمج User-Agent التطبيق مع تمرير الـ Cookies والـ Referer إن وجدوا من التطبيق
         const requestHeaders = {
             'Referer': req.headers['referer'] || req.headers['origin'] || new URL(imageUrl).origin,
-            'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'User-Agent': req.headers['user-agent'] || APP_USER_AGENT,
             'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
             'Accept-Encoding': 'gzip, deflate',
             'Sec-Fetch-Dest': 'image',
@@ -74,7 +77,6 @@ app.get('/', async (req, res) => {
 
         const contentType = response.headers['content-type'] || '';
 
-        // التحقق من الحماية (إذا كان الرد HTML وليس صورة أو رمز الخطأ 400+)
         if (response.status >= 400 || contentType.includes('text/html')) {
             throw new Error(`Status: ${response.status} - Content: ${contentType.split(';')[0]}`);
         }
@@ -126,14 +128,13 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '1.6-SmartProxy',
+            'X-Proxy-Version': '1.7-SmartProxy',
             'X-Image-Type': isCover ? 'Cover' : 'Chapter'
         }); 
 
         return res.status(200).send(compressedBuffer); 
 
     } catch (err) {
-        // استخراج رسالة الخطأ لطباعتها على الصورة مباشرة
         let errorReason = err.message;
         if (err.response) {
             errorReason = `Status: ${err.response.status}`;
@@ -142,11 +143,11 @@ app.get('/', async (req, res) => {
         console.error(`[Error] Fetching ${imageUrl}:`, errorReason); 
 
         try {
-            const fallbackBuffer = await getFallbackImage(errorReason);
+            const fallbackBuffer = await getFallbackImage();
             res.set({
                 'Content-Type': 'image/jpeg',
                 'Content-Length': fallbackBuffer.length,
-                'Cache-Control': 'no-cache', // منع الكاش للأخطاء لتحديثها فور حل المشكلة
+                'Cache-Control': 'no-cache',
                 'X-Proxy-Status': 'Fallback-Error-Image'
             });
             return res.status(200).send(fallbackBuffer);
@@ -156,4 +157,4 @@ app.get('/', async (req, res) => {
     }
 }); 
 
-module.exports = app;
+module.exports = app; 
