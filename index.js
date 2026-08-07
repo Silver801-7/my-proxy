@@ -28,18 +28,26 @@ const COVER_PATTERNS = [
     'cover_url', 'thumbnail_url'
 ]; 
 
-async function getFallbackImage() {
-    return await sharp({
-        create: {
-            width: 400,
-            height: 600,
-            channels: 3,
-            background: { r: 15, g: 15, b: 15 }
-        }
-    })
-    .jpeg({ quality: 10 })
-    .toBuffer();
-} 
+// دالة لإنشاء صورة سوداء مكتوب عليها رسالة الخطأ بالتفصيل لتشخيص المشكلة من داخل التطبيق
+async function getFallbackImage(errorMessage = "Unknown Error") {
+    const safeError = errorMessage.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').substring(0, 50);
+    
+    const svgText = `
+        <svg width="400" height="600" xmlns="http://www.w3.org/2000/svg">
+            <rect width="100%" height="100%" fill="#111111"/>
+            <text x="50%" y="45%" font-family="Arial" font-size="24" fill="#ff4444" text-anchor="middle" font-weight="bold">
+                Blocked by Protection
+            </text>
+            <text x="50%" y="55%" font-family="Consolas, monospace" font-size="14" fill="#ffffff" text-anchor="middle">
+                ${safeError}
+            </text>
+        </svg>
+    `;
+
+    return await sharp(Buffer.from(svgText))
+        .jpeg({ quality: 60 })
+        .toBuffer();
+}
 
 function checkIfCover(url) {
     if (!url) return false;
@@ -49,11 +57,10 @@ function checkIfCover(url) {
 app.get('/', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) {
-        return res.status(200).send('v1.5-SmartProxy Active (Header Forwarding)');
+        return res.status(200).send('v1.6-SmartProxy Active (Diagnostics Mode)');
     } 
 
     try {
-        // [التعديل الجذري]: بناء ترويسات ديناميكية تعتمد على ما يرسله التطبيق
         const requestHeaders = {
             'Referer': req.headers['referer'] || req.headers['origin'] || new URL(imageUrl).origin,
             'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
@@ -64,7 +71,6 @@ app.get('/', async (req, res) => {
             'Sec-Fetch-Site': 'cross-site'
         };
 
-        // تمرير ملفات تعريف الارتباط (Cookies) الخاصة بتخطي الحماية إن وجدت
         if (req.headers['cookie']) {
             requestHeaders['Cookie'] = req.headers['cookie'];
         }
@@ -75,9 +81,9 @@ app.get('/', async (req, res) => {
 
         const contentType = response.headers['content-type'] || '';
 
-        // التحقق مما إذا كان الرد هو صفحة HTML (حماية ك라우د فلير) بدلاً من صورة
+        // التحقق من الحماية (إذا كان الرد HTML وليس صورة أو رمز الخطأ 400+)
         if (response.status >= 400 || contentType.includes('text/html')) {
-            throw new Error(`Protection Blocked (Status: ${response.status}) - Content: ${contentType}`);
+            throw new Error(`Status: ${response.status} - Content: ${contentType.split(';')[0]}`);
         }
 
         const isCover = checkIfCover(imageUrl); 
@@ -127,27 +133,32 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '1.5-SmartProxy',
+            'X-Proxy-Version': '1.6-SmartProxy',
             'X-Image-Type': isCover ? 'Cover' : 'Chapter'
         }); 
 
         return res.status(200).send(compressedBuffer); 
 
     } catch (err) {
-        // طباعة الخطأ الفعلي في الكونسول لتشخيص المشكلة بدقة
-        console.error(`[Error] Fetching ${imageUrl}:`, err.message); 
+        // استخراج رسالة الخطأ لطباعتها على الصورة مباشرة
+        let errorReason = err.message;
+        if (err.response) {
+            errorReason = `Status: ${err.response.status}`;
+        }
+
+        console.error(`[Error] Fetching ${imageUrl}:`, errorReason); 
 
         try {
-            const fallbackBuffer = await getFallbackImage();
+            const fallbackBuffer = await getFallbackImage(errorReason);
             res.set({
                 'Content-Type': 'image/jpeg',
                 'Content-Length': fallbackBuffer.length,
-                'Cache-Control': 'public, max-age=86400',
-                'X-Proxy-Status': 'Fallback-Image'
+                'Cache-Control': 'no-cache', // منع الكاش للأخطاء لتحديثها فور حل المشكلة
+                'X-Proxy-Status': 'Fallback-Error-Image'
             });
             return res.status(200).send(fallbackBuffer);
         } catch (fallbackErr) {
-            return res.status(500).send('Critical Error');
+            return res.status(500).send('Critical Error generating fallback');
         }
     }
 }); 
