@@ -6,28 +6,21 @@ const https = require('https');
 
 const app = express(); 
 
-// إعداد عملاء الاتصال مع تفعيل keepAlive وأعلى كفاءة
+// إعداد عملاء الاتصال بكفاءة عالية
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 const httpsAgent = new https.Agent({ 
     keepAlive: true, 
     maxSockets: 50,
-    rejectUnauthorized: false // تجاوز أخطاء SSL لمواقع المانجا
+    rejectUnauthorized: false // تجاوز أخطاء شهادات SSL للمواقع
 }); 
 
 const axiosInstance = axios.create({
-    timeout: 15000, // مهلة 15 ثانية لاستجابة وخوادم الصور
+    timeout: 15000, 
     responseType: 'arraybuffer',
     httpAgent,
-    httpsAgent,
-    headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
-        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Accept-Encoding': 'gzip, deflate, br'
-    }
+    httpsAgent
 }); 
 
-// قائمة محدثة ودقيقة لكشف الأغلفة بدون مطابقة روابط الفصول العادية بالخطأ
 const COVER_PATTERNS = [
     'cover', 'thumb', 'poster', 'avatar', 'banner', 'front',
     'thumbnail', 'card', 'preview', 'jacket', 'artwork', 
@@ -35,7 +28,7 @@ const COVER_PATTERNS = [
     'cover_url', 'thumbnail_url'
 ]; 
 
-// إنشاء صورة سوداء بديلة خفيفة
+// إنشاء صورة بديلة خفيفة في حال فشل جلب الصورة لأي سبب
 async function getFallbackImage() {
     return await sharp({
         create: {
@@ -49,7 +42,6 @@ async function getFallbackImage() {
     .toBuffer();
 } 
 
-// الدالة الاحترافية للتحقق مما إذا كان الرابط لغلاف أو صورة مصغرة
 function checkIfCover(url) {
     if (!url) return false;
     const lowerUrl = url.toLowerCase();
@@ -59,48 +51,58 @@ function checkIfCover(url) {
 app.get('/', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) {
-        return res.status(200).send('v1.3-SmartProxy Active');
+        return res.status(200).send('v1.4-SmartProxy Active');
     } 
 
     try {
-        // 1. جلب الصورة من المصدر الأصلي
+        // استخراج أصل الموقع (Domain Origin) لاستخدامه كـ Referer دقيق لتجنب حظر Hotlinking
+        const parsedUrl = new URL(imageUrl);
+        const domainOrigin = parsedUrl.origin;
+
+        // تجهيز الترويسات لجعل الطلب يبدو كأنه صادر من متصفح حقيقي يفتح الموقع الأصلي
+        const requestHeaders = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+            'Referer': domainOrigin + '/',
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Sec-Fetch-Dest': 'image',
+            'Sec-Fetch-Mode': 'no-cors',
+            'Sec-Fetch-Site': 'cross-site'
+        };
+
+        // تمرير الكوكيز إذا أرسلها التطبيق
+        if (req.headers['cookie']) {
+            requestHeaders['Cookie'] = req.headers['cookie'];
+        }
+
+        // 1. جلب الصورة من المصدر الأصلي مع الترويسات الصحيحة
         const response = await axiosInstance.get(imageUrl, {
-            headers: {
-                'Referer': new URL(imageUrl).origin
-            }
+            headers: requestHeaders
         }); 
 
         // 2. الفحص الذكي للرابط وتحديد نوع الصورة
         const isCover = checkIfCover(imageUrl); 
 
-        // قراءة معلمات الجودة المرسلة من التطبيق أولاً
         const rawQuality = req.query.q || req.query.quality || req.query.l || req.headers['x-image-quality'];
         let quality;
         let targetWidth;
 
         if (rawQuality) {
-            // إعطاء الأولوية المطلقة للجودة المحددة من التطبيق
             quality = parseInt(rawQuality, 10);
             if (isNaN(quality)) quality = 40;
             quality = Math.max(1, Math.min(100, quality));
-            
             targetWidth = isCover ? 280 : Math.round(450 + (quality / 100) * 900);
         } else if (isCover) {
-            // افتراضي للأغلفة في حال عدم تحديد التطبيق للجودة
             targetWidth = 280; 
             quality = 20;     
         } else {
-            // افتراضي للفصول في حال عدم تحديد التطبيق للجودة
             quality = 40;
             targetWidth = Math.round(450 + (quality / 100) * 900);
         }
 
-        // طباعة التتبع في السجلات لسهولة الفحص
-        console.log(`[${isCover ? 'غلاف COVER' : 'فصل CHAPTER'}] (Quality: ${quality}%): ${imageUrl}`); 
-
         const isGrayscale = req.query.bw === '1' || req.query.bw === 'true' || req.query.grayscale === '1'; 
 
-        // 3. بناء خط المعالجة الضوئي (Sharp Processing Pipeline)
+        // 3. معالجة وضغط الصورة عبر مكتبة Sharp
         let pipeline = sharp(response.data, { failOn: 'none', fastShrinkOnLoad: true })
             .rotate()
             .resize({
@@ -129,7 +131,7 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '1.3-SmartProxy',
+            'X-Proxy-Version': '1.4-SmartProxy',
             'X-Image-Type': isCover ? 'Cover' : 'Chapter'
         }); 
 
