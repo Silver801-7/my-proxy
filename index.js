@@ -6,24 +6,28 @@ const https = require('https');
 
 const app = express(); 
 
+// إعداد عملاء الاتصال مع تفعيل keepAlive وأعلى كفاءة
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 const httpsAgent = new https.Agent({ 
     keepAlive: true, 
     maxSockets: 50,
-    rejectUnauthorized: false
+    rejectUnauthorized: false // تجاوز أخطاء SSL لمواقع المانجا
 }); 
 
-// الـ User-Agent الخاص بتطبيقك مباشرة
-const APP_USER_AGENT = 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36';
-
 const axiosInstance = axios.create({
-    timeout: 15000, 
+    timeout: 15000, // مهلة 15 ثانية لاستجابة وخوادم الصور
     responseType: 'arraybuffer',
     httpAgent,
     httpsAgent,
-    validateStatus: () => true 
+    headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br'
+    }
 }); 
 
+// قائمة محدثة ودقيقة لكشف الأغلفة بدون مطابقة روابط الفصول العادية بالخطأ
 const COVER_PATTERNS = [
     'cover', 'thumb', 'poster', 'avatar', 'banner', 'front',
     'thumbnail', 'card', 'preview', 'jacket', 'artwork', 
@@ -31,77 +35,72 @@ const COVER_PATTERNS = [
     'cover_url', 'thumbnail_url'
 ]; 
 
+// إنشاء صورة سوداء بديلة خفيفة
 async function getFallbackImage() {
     return await sharp({
         create: {
             width: 400,
             height: 600,
             channels: 3,
-            background: { r: 40, g: 10, b: 10 } 
+            background: { r: 15, g: 15, b: 15 }
         }
     })
     .jpeg({ quality: 10 })
     .toBuffer();
-}
+} 
 
+// الدالة الاحترافية للتحقق مما إذا كان الرابط لغلاف أو صورة مصغرة
 function checkIfCover(url) {
     if (!url) return false;
-    return COVER_PATTERNS.some(pattern => url.toLowerCase().includes(pattern));
+    const lowerUrl = url.toLowerCase();
+    return COVER_PATTERNS.some(pattern => lowerUrl.includes(pattern));
 } 
 
 app.get('/', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) {
-        return res.status(200).send('v1.7-SmartProxy Active (App UA Linked)');
+        return res.status(200).send('v1.3-SmartProxy Active');
     } 
 
     try {
-        // دمج User-Agent التطبيق مع تمرير الـ Cookies والـ Referer إن وجدوا من التطبيق
-        const requestHeaders = {
-            'Referer': req.headers['referer'] || req.headers['origin'] || new URL(imageUrl).origin,
-            'User-Agent': req.headers['user-agent'] || APP_USER_AGENT,
-            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Accept-Encoding': 'gzip, deflate',
-            'Sec-Fetch-Dest': 'image',
-            'Sec-Fetch-Mode': 'no-cors',
-            'Sec-Fetch-Site': 'cross-site'
-        };
-
-        if (req.headers['cookie']) {
-            requestHeaders['Cookie'] = req.headers['cookie'];
-        }
-
+        // 1. جلب الصورة من المصدر الأصلي
         const response = await axiosInstance.get(imageUrl, {
-            headers: requestHeaders
+            headers: {
+                'Referer': new URL(imageUrl).origin
+            }
         }); 
 
-        const contentType = response.headers['content-type'] || '';
-
-        if (response.status >= 400 || contentType.includes('text/html')) {
-            throw new Error(`Status: ${response.status} - Content: ${contentType.split(';')[0]}`);
-        }
-
+        // 2. الفحص الذكي للرابط وتحديد نوع الصورة
         const isCover = checkIfCover(imageUrl); 
+
+        // قراءة معلمات الجودة المرسلة من التطبيق أولاً
         const rawQuality = req.query.q || req.query.quality || req.query.l || req.headers['x-image-quality'];
-        
         let quality;
         let targetWidth;
 
         if (rawQuality) {
+            // إعطاء الأولوية المطلقة للجودة المحددة من التطبيق
             quality = parseInt(rawQuality, 10);
             if (isNaN(quality)) quality = 40;
             quality = Math.max(1, Math.min(100, quality));
+            
             targetWidth = isCover ? 280 : Math.round(450 + (quality / 100) * 900);
         } else if (isCover) {
+            // افتراضي للأغلفة في حال عدم تحديد التطبيق للجودة
             targetWidth = 280; 
             quality = 20;     
         } else {
+            // افتراضي للفصول في حال عدم تحديد التطبيق للجودة
             quality = 40;
             targetWidth = Math.round(450 + (quality / 100) * 900);
         }
 
+        // طباعة التتبع في السجلات لسهولة الفحص
+        console.log(`[${isCover ? 'غلاف COVER' : 'فصل CHAPTER'}] (Quality: ${quality}%): ${imageUrl}`); 
+
         const isGrayscale = req.query.bw === '1' || req.query.bw === 'true' || req.query.grayscale === '1'; 
 
+        // 3. بناء خط المعالجة الضوئي (Sharp Processing Pipeline)
         let pipeline = sharp(response.data, { failOn: 'none', fastShrinkOnLoad: true })
             .rotate()
             .resize({
@@ -111,7 +110,9 @@ app.get('/', async (req, res) => {
                 fastShrinkOnLoad: true
             }); 
 
-        if (isGrayscale && !isCover) pipeline = pipeline.grayscale();
+        if (isGrayscale && !isCover) {
+            pipeline = pipeline.grayscale();
+        } 
 
         pipeline = pipeline.jpeg({
             quality: quality,
@@ -128,33 +129,28 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '1.7-SmartProxy',
+            'X-Proxy-Version': '1.3-SmartProxy',
             'X-Image-Type': isCover ? 'Cover' : 'Chapter'
         }); 
 
         return res.status(200).send(compressedBuffer); 
 
     } catch (err) {
-        let errorReason = err.message;
-        if (err.response) {
-            errorReason = `Status: ${err.response.status}`;
-        }
-
-        console.error(`[Error] Fetching ${imageUrl}:`, errorReason); 
+        console.error(`Image Fetch Error [${imageUrl}]:`, err.message); 
 
         try {
             const fallbackBuffer = await getFallbackImage();
             res.set({
                 'Content-Type': 'image/jpeg',
                 'Content-Length': fallbackBuffer.length,
-                'Cache-Control': 'no-cache',
-                'X-Proxy-Status': 'Fallback-Error-Image'
+                'Cache-Control': 'public, max-age=86400',
+                'X-Proxy-Status': 'Fallback-Image'
             });
             return res.status(200).send(fallbackBuffer);
         } catch (fallbackErr) {
-            return res.status(500).send('Critical Error generating fallback');
+            return res.status(500).send('Critical Error');
         }
     }
 }); 
 
-module.exports = app; 
+module.exports = app;
