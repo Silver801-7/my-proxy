@@ -20,33 +20,23 @@ const axiosInstance = axios.create({
     httpsAgent
 }); 
 
-// دالة ذكية لتوليد صورة الخطأ مع كشف ما إذا كانت الصورة مكسورة أو تالفة
+// دالة توليد صورة الأخطاء الملونة بدون نصوص لمنع ظهور المربعات
 async function getFallbackImage(errorMessage = 'Unknown Error') {
-    let mainTitle = 'Proxy Error Detected';
-    let subDesc = errorMessage;
+    let bgColor = '#111111'; // الأسود: خطأ عام في السيرفر
 
-    // كشف ما إذا كان الخطأ بسبب رابط تالف أو عدم عثور السيرفر على الصورة
-    if (errorMessage.includes('404') || errorMessage.includes('Status: 404') || errorMessage.includes('Not Found')) {
-        mainTitle = 'Broken Image (404)';
-        subDesc = 'Image link is dead or removed by source';
+    if (errorMessage.includes('404') || errorMessage.includes('Not Found')) {
+        bgColor = '#FF4444'; // الأحمر: صورة مكسورة
     } else if (errorMessage.includes('timeout') || errorMessage.includes('ETIMEDOUT')) {
-        mainTitle = 'Connection Timeout';
-        subDesc = 'Source server is too slow or down';
+        bgColor = '#FFCC00'; // الأصفر: انتهى وقت الاتصال
+    } else if (errorMessage.includes('403') || errorMessage.includes('Forbidden') || errorMessage.includes('Cloudflare')) {
+        bgColor = '#FF8C00'; // البرتقالي: حظر من المصدر
+    } else if (errorMessage.includes('Content-Type') || errorMessage.includes('HTML')) {
+        bgColor = '#00AAFF'; // الأزرق: خطأ في نوع الملف
     }
 
-    const cleanMsg = subDesc.replace(/[^a-zA-Z0-9 _.-]/g, '').substring(0, 42);
-    
     const svgText = `
         <svg width="600" height="400">
-            <style>
-                .title { fill: #ff4444; font-family: sans-serif; font-weight: bold; font-size: 24px; }
-                .desc { fill: #ffffff; font-family: monospace; font-size: 15px; }
-            </style>
-            <rect width="100%" height="100%" fill="#111111"/>
-            <text x="30" y="80" class="title">${mainTitle}</text>
-            <text x="30" y="150" class="desc">Reason: ${cleanMsg}</text>
-            <text x="30" y="220" class="desc">Status: Failed to fetch from source</text>
-            <text x="30" y="320" fill="#888888" font-family="sans-serif" font-size="14px">SmartProxy v2.6</text>
+            <rect width="100%" height="100%" fill="${bgColor}"/>
         </svg>
     `;
 
@@ -58,7 +48,7 @@ async function getFallbackImage(errorMessage = 'Unknown Error') {
 app.get('/', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) {
-        return res.status(200).send('v2.6-SmartProxy Active (Broken Image Detection)');
+        return res.status(200).send('v2.7-SmartProxy Active (Color-Coded Status)');
     } 
 
     let lastErrorMsg = '';
@@ -144,7 +134,7 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '2.6-SmartProxy'
+            'X-Proxy-Version': '2.7-SmartProxy'
         }); 
 
         return res.status(200).send(compressedBuffer); 
