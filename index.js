@@ -36,7 +36,7 @@ async function getFallbackImage() {
 app.get('/', async (req, res) => {
     const imageUrl = req.query.url;
     if (!imageUrl) {
-        return res.status(200).send('v2.1-SmartProxy Active (800KB Limit)');
+        return res.status(200).send('v2.2-SmartProxy Active (Dynamic Threshold & +15% Width)');
     } 
 
     try {
@@ -87,13 +87,16 @@ app.get('/', async (req, res) => {
             quality = Math.max(1, Math.min(100, quality));
         }
 
+        // حساب الحد الأدنى المتغير للحجم بناءً على الجودة (يبدأ من 680 KB عند 10% ويزيد 8 KB لكل 1%)
+        const dynamicThresholdKB = 680 + ((quality - 10) * 8);
+
         const isGrayscale = req.query.bw === '1' || req.query.bw === 'true' || req.query.grayscale === '1'; 
 
         let pipeline = sharp(response.data, { failOn: 'none', fastShrinkOnLoad: true }).rotate(); 
 
-        // القاعدة الجديدة: إذا كان حجم الصورة أكبر من 800 كيلوبايت، يتم تطبيق معادلة الأبعاد القديمة
-        if (fileSizeInKB > 800) {
-            const targetWidth = Math.round(450 + (quality / 100) * 900);
+        // تطبيق الشرط الذكي باستخدام الحد المتغير والثوابت الجديدة (زيادة 15%)
+        if (fileSizeInKB > dynamicThresholdKB) {
+            const targetWidth = Math.round(517 + (quality / 100) * 1035);
             pipeline = pipeline.resize({
                 width: targetWidth,
                 fit: 'inside',
@@ -121,7 +124,7 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '2.1-SmartProxy'
+            'X-Proxy-Version': '2.2-SmartProxy'
         }); 
 
         return res.status(200).send(compressedBuffer); 
