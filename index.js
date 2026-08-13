@@ -106,7 +106,7 @@ app.get('/', async (req, res) => {
         let pipeline = sharp(response.data, { failOn: 'none', fastShrinkOnLoad: true }).rotate(); 
 
         if (fileSizeInKB > dynamicThresholdKB) {
-            const targetWidth = Math.round(517 + (quality / 100) * 1035);
+            const targetWidth = Math.round(508 + (quality / 100) * 1012);
             pipeline = pipeline.resize({
                 width: targetWidth,
                 fit: 'inside',
