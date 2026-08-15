@@ -15,6 +15,7 @@ const httpsAgent = new https.Agent({
 
 const axiosInstance = axios.create({
     timeout: 15000, 
+    maxRedirects: 10, // السماح بالتوجيه التلقائي للمواقع التي تغير روابطها
     responseType: 'arraybuffer',
     httpAgent,
     httpsAgent
@@ -45,30 +46,28 @@ async function getFallbackImage(errorMessage = 'Unknown Error') {
 } 
 
 app.get('/', async (req, res) => {
-    let imageUrl = req.query.url;
-    if (!imageUrl) {
-        return res.status(200).send('v2.8-SmartProxy Active (Headers Forwarding)');
+    const rawUrlParam = req.query.url;
+    if (!rawUrlParam) {
+        return res.status(200).send('v2.9-SmartProxy Active (URL-Safe Engine)');
     } 
-
-    // 1. استعادة التوكنز وأي أجزاء مفقودة من الرابط بسبب تفكيك Express
-    const proxyParams = ['url', 'q', 'quality', 'l', 'bw', 'grayscale'];
-    let hasQuestionMark = imageUrl.includes('?');
-    
-    for (const [key, value] of Object.entries(req.query)) {
-        if (!proxyParams.includes(key)) {
-            imageUrl += (hasQuestionMark ? '&' : '?') + `${key}=${encodeURIComponent(value)}`;
-            hasQuestionMark = true;
-        }
-    }
 
     let lastErrorMsg = '';
 
     try {
-        const parsedUrl = new URL(imageUrl);
-        const domainOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
-        const safeUrl = parsedUrl.href; 
+        // 1. إعادة بناء الرابط بدقة لمنع تمزق أي جزء منه
+        const targetUrl = new URL(rawUrlParam);
+        const proxyKeys = ['url', 'q', 'quality', 'l', 'bw', 'grayscale'];
+        
+        for (const [key, value] of Object.entries(req.query)) {
+            if (!proxyKeys.includes(key)) {
+                targetUrl.searchParams.append(key, value);
+            }
+        }
+        
+        const finalSafeUrl = targetUrl.href;
+        const domainOrigin = `${targetUrl.protocol}//${targetUrl.host}`;
 
-        // 2. تمرير ترويسات Tachiyomi الأصلية بذكاء لتخطي الحماية
+        // 2. ترويسات دقيقة لمحاكاة متصفح التطبيق وتجاوز الحظر
         const requestHeaders = {
             'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Referer': req.headers['referer'] || `${domainOrigin}/`,
@@ -76,11 +75,11 @@ app.get('/', async (req, res) => {
             'Accept-Language': req.headers['accept-language'] || 'ar,en-US;q=0.9,en;q=0.8'
         };
 
-        // تمرير الـ Origin والـ Cookie إذا أرسلها Tachiyomi
-        if (req.headers['origin']) requestHeaders['Origin'] = req.headers['origin'];
         if (req.headers['cookie']) requestHeaders['Cookie'] = req.headers['cookie'];
+        if (req.headers['origin']) requestHeaders['Origin'] = req.headers['origin'];
 
-        const response = await axiosInstance.get(safeUrl, {
+        // 3. جلب الصورة باستخدام الرابط المتكامل
+        const response = await axiosInstance.get(finalSafeUrl, {
             headers: requestHeaders
         }); 
 
@@ -135,14 +134,14 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '2.8-SmartProxy'
+            'X-Proxy-Version': '2.9-SmartProxy'
         }); 
 
         return res.status(200).send(compressedBuffer); 
 
     } catch (err) {
         lastErrorMsg = err.message || 'Fetch Failed';
-        console.error(`Image Fetch Error [${imageUrl}]:`, lastErrorMsg); 
+        console.error(`Image Fetch Error [${rawUrlParam}]:`, lastErrorMsg); 
 
         try {
             const fallbackBuffer = await getFallbackImage(lastErrorMsg);
