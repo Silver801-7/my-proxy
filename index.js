@@ -24,7 +24,7 @@ const axiosInstance = axios.create({
 app.get('/', async (req, res) => {
     const rawUrlParam = req.query.url;
     if (!rawUrlParam) {
-        return res.status(200).send('v3.1-SmartProxy Active (Auto-Redirect Bypass)');
+        return res.status(200).send('v3.2-SmartProxy Active (Direct Buffer Fallback)');
     } 
 
     try {
@@ -54,15 +54,25 @@ app.get('/', async (req, res) => {
         try {
             response = await axiosInstance.get(finalSafeUrl, { headers: requestHeaders });
         } catch (axiosErr) {
-            // **الحل الجذري هنا**: إذا رفض السيرفر الطلب (حظر/404)، قم بتحويل الطلب للرابط الأصلي مباشرة لتفادي اللون الأحمر!
-            console.warn(`Proxy fetch failed for [${finalSafeUrl}], redirecting to direct URL.`);
-            return res.redirect(302, rawUrlParam);
+            // **الحل الجذري الحقيقي**: إذا فشل البروكسي، لا ترجع صورة حمراء، بل اسحب الصورة الأصلية مباشرة وأرسلها للتطبيق كبايتات صالحة!
+            console.warn(`Proxy failed, fetching original image directly for: ${finalSafeUrl}`);
+            const directResponse = await axios.get(finalSafeUrl, { 
+                responseType: 'arraybuffer',
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Referer': exactOrigin + '/' }
+            });
+            
+            res.set({
+                'Content-Type': directResponse.headers['content-type'] || 'image/jpeg',
+                'Content-Length': directResponse.data.length,
+                'Cache-Control': 'public, max-age=31536000, immutable',
+                'X-Proxy-Status': 'Bypassed-Direct'
+            });
+            return res.status(200).send(directResponse.data);
         }
 
         const contentType = response.headers['content-type'] || '';
         if (response.status >= 400 || contentType.includes('text/html')) {
-            // إذا كان الرد HTML (حماية كلوترافير أو صفحة خطأ)، اعبر للرابط الأصلي فوراً
-            return res.redirect(302, rawUrlParam);
+            throw new Error(`Invalid Response Status or HTML Content`);
         }
 
         const fileSizeInKB = response.data.length / 1024;
@@ -111,14 +121,19 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '3.1-SmartBypass'
+            'X-Proxy-Version': '3.2-SmartProxy'
         }); 
 
         return res.status(200).send(compressedBuffer); 
 
     } catch (err) {
-        // في حال حدوث أي خطأ برمجي غير متوقع، يتم التوجيه للرابط الأصلي لضمان عدم توقف القراءة نهائياً
-        return res.redirect(302, rawUrlParam);
+        // إذا حدث خطأ نهائي، جرب إرسال الصورة الأصلية مباشرة بدلاً من المربع الأحمر الوهمي
+        try {
+            const fallbackDirect = await axios.get(rawUrlParam, { responseType: 'arraybuffer' });
+            return res.status(200).send(fallbackDirect.data);
+        } catch (e) {
+            return res.status(500).send('Critical Error');
+        }
     }
 }); 
 
