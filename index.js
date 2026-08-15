@@ -15,7 +15,7 @@ const httpsAgent = new https.Agent({
 
 const axiosInstance = axios.create({
     timeout: 15000, 
-    maxRedirects: 10, // السماح بالتوجيه التلقائي للمواقع التي تغير روابطها
+    maxRedirects: 10,
     responseType: 'arraybuffer',
     httpAgent,
     httpsAgent
@@ -48,13 +48,12 @@ async function getFallbackImage(errorMessage = 'Unknown Error') {
 app.get('/', async (req, res) => {
     const rawUrlParam = req.query.url;
     if (!rawUrlParam) {
-        return res.status(200).send('v2.9-SmartProxy Active (URL-Safe Engine)');
+        return res.status(200).send('v3.0-SmartProxy Active (Exact Referer Engine)');
     } 
 
     let lastErrorMsg = '';
 
     try {
-        // 1. إعادة بناء الرابط بدقة لمنع تمزق أي جزء منه
         const targetUrl = new URL(rawUrlParam);
         const proxyKeys = ['url', 'q', 'quality', 'l', 'bw', 'grayscale'];
         
@@ -65,20 +64,28 @@ app.get('/', async (req, res) => {
         }
         
         const finalSafeUrl = targetUrl.href;
-        const domainOrigin = `${targetUrl.protocol}//${targetUrl.host}`;
+        
+        // استخراج النطاق الدقيق لصورة الفصل الحالي (سواء كانت على CDN أو السيرفر الرئيسي)
+        const exactOrigin = `${targetUrl.protocol}//${targetUrl.host}`;
 
-        // 2. ترويسات دقيقة لمحاكاة متصفح التطبيق وتجاوز الحظر
+        // ترويسات مطابقة تماماً لتصفح حقيقي من تطبيق المانها
         const requestHeaders = {
-            'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': req.headers['referer'] || `${domainOrigin}/`,
-            'Accept': req.headers['accept'] || 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Accept-Language': req.headers['accept-language'] || 'ar,en-US;q=0.9,en;q=0.8'
+            'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36',
+            'Referer': exactOrigin + '/',
+            'Origin': exactOrigin,
+            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+            'Cache-Control': 'no-cache',
+            'Pragma': 'no-cache',
+            'Sec-Fetch-Dest': 'image',
+            'Sec-Fetch-Mode': 'cors',
+            'Sec-Fetch-Site': 'cross-site'
         };
 
-        if (req.headers['cookie']) requestHeaders['Cookie'] = req.headers['cookie'];
-        if (req.headers['origin']) requestHeaders['Origin'] = req.headers['origin'];
+        if (req.headers['cookie']) {
+            requestHeaders['Cookie'] = req.headers['cookie'];
+        }
 
-        // 3. جلب الصورة باستخدام الرابط المتكامل
         const response = await axiosInstance.get(finalSafeUrl, {
             headers: requestHeaders
         }); 
@@ -106,7 +113,7 @@ app.get('/', async (req, res) => {
         let pipeline = sharp(response.data, { failOn: 'none', fastShrinkOnLoad: true }).rotate(); 
 
         if (fileSizeInKB > dynamicThresholdKB) {
-            const targetWidth = Math.round(500 + (quality / 100) * 1000);
+            const targetWidth = Math.round(517 + (quality / 100) * 1035); // الثوابت الأصلية المستقرة لضمان وضوح النصوص
             pipeline = pipeline.resize({
                 width: targetWidth,
                 fit: 'inside',
@@ -134,7 +141,7 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '2.9-SmartProxy'
+            'X-Proxy-Version': '3.0-SmartProxy'
         }); 
 
         return res.status(200).send(compressedBuffer); 
