@@ -89,6 +89,22 @@ async function getFallbackImage(error) {
     .toBuffer();
 }
 
+function normalizeMeshMangaImageUrl(imageUrl) {
+  try {
+    const sourceUrl = new URL(imageUrl);
+
+    // API يعيد روابط appswat.com، لكن مسار الوسائط نفسه متاح عبر meshmanga.com.
+    if (sourceUrl.hostname.toLowerCase() === 'appswat.com') {
+      sourceUrl.hostname = 'meshmanga.com';
+      return sourceUrl.toString();
+    }
+  } catch (_) {
+    // سيتم التعامل مع الرابط غير الصالح في مرحلة التحقق الرئيسية.
+  }
+
+  return imageUrl;
+}
+
 function getQuality(req) {
   const rawQuality =
     req.query.q ||
@@ -163,6 +179,8 @@ app.get('/', async (req, res) => {
     return res.status(200).send(fallbackBuffer);
   }
 
+  const upstreamImageUrl = normalizeMeshMangaImageUrl(imageUrl);
+
   try {
     const domainOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
 
@@ -194,9 +212,12 @@ app.get('/', async (req, res) => {
     }
 
     // هذا يطبع الرابط الذي يستلمه البروكسي فعلياً.
-    console.log('IMAGE REQUEST TO PROXY:', imageUrl);
+    console.log('IMAGE REQUEST TO PROXY:', {
+      requestedUrl: imageUrl,
+      upstreamUrl: upstreamImageUrl,
+    });
 
-    const response = await axiosInstance.get(imageUrl, {
+    const response = await axiosInstance.get(upstreamImageUrl, {
       headers: requestHeaders,
     });
 
@@ -209,10 +230,11 @@ app.get('/', async (req, res) => {
       ? response.data
       : Buffer.from(response.data || '');
 
-    const finalUrl = response.request?.res?.responseUrl || imageUrl;
+    const finalUrl = response.request?.res?.responseUrl || upstreamImageUrl;
 
     console.log('UPSTREAM IMAGE RESPONSE:', {
       requestedUrl: imageUrl,
+      upstreamUrl: upstreamImageUrl,
       finalUrl,
       status: response.status,
       contentType,
@@ -328,6 +350,7 @@ app.get('/', async (req, res) => {
       return res.status(502).json({
         proxyVersion: '2.8-Debuggable',
         requestedUrl: imageUrl,
+        upstreamUrl: upstreamImageUrl,
         status: errorStatus,
         code: error.code || null,
         message: errorMessage,
@@ -337,6 +360,7 @@ app.get('/', async (req, res) => {
 
     console.error('IMAGE PROXY ERROR:', {
       imageUrl,
+      upstreamUrl: upstreamImageUrl,
       status: errorStatus,
       code: error.code || '',
       message: errorMessage,
