@@ -311,7 +311,7 @@ app.get('/', async (req, res) => {
 
     const fileSizeInKB = responseBuffer.length / 1024;
     const quality = getQuality(req);
-    const dynamicThresholdKB = 680 + (quality - 10) * 8;
+    const dynamicThresholdKB = 650 + (quality - 10) * 8;
 
     const isGrayscale =
       req.query.bw === '1' ||
@@ -323,7 +323,7 @@ app.get('/', async (req, res) => {
       fastShrinkOnLoad: true,
     }).rotate();
 
-    const targetWidth = Math.round(500 + (quality / 100) * 1000);
+    const targetWidth = Math.round(495 + (quality / 100) * 970);
     const shouldResize =
       fileSizeInKB > dynamicThresholdKB ||
       (metadata.width && metadata.width > targetWidth);
