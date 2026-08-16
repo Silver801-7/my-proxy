@@ -6,32 +6,22 @@ const app = express();
 
 app.get('/', async (req, res) => {
     try {
-        const urlMatch = req.url.match(/[?&]url=([^&]*)/);
-        if (!urlMatch || !urlMatch[1]) {
-            return res.status(200).send('v6.2-SafeActive');
-        }
-
-        const rawQuery = urlMatch[1];
-        let targetUrlString = rawQuery;
+        // الاعتماد على req.query.url بشكل مباشر وآمن لتجنب انهيارات مسارات الـ Vercel
+        const targetUrlString = req.query.url;
         
-        // فك تشفير آمن 100% ومحمي ضد أي خطأ URIError قد يسبب انهيار السيرفر
-        try {
-            targetUrlString = decodeURIComponent(rawQuery);
-        } catch (e) {
-            targetUrlString = rawQuery;
+        if (!targetUrlString) {
+            return res.status(200).send('v6.3-VercelSafe Active');
         }
 
+        // تحليل الهوست والمسار بطريقة آمنة جداً لا تسبب Crash أبدًا
         let parsed;
         try {
             parsed = new URL(targetUrlString);
         } catch (err) {
-            // إذا فشل تحليل الرابط المباشر، جرب تحليله بعد فك إضافي حذر
             try {
-                const secondDecode = decodeURIComponent(targetUrlString);
-                parsed = new URL(secondDecode);
-                targetUrlString = secondDecode;
-            } catch (innerErr) {
-                return res.status(400).send('Invalid URL');
+                parsed = new URL(decodeURIComponent(targetUrlString));
+            } catch (e) {
+                return res.status(400).send('Invalid URL format');
             }
         }
 
@@ -49,6 +39,7 @@ app.get('/', async (req, res) => {
             requestHeaders['Cookie'] = req.headers['cookie'];
         }
 
+        // تنفيذ الطلب عبر undici
         const response = await request(origin, {
             path: fullPath,
             method: 'GET',
@@ -64,6 +55,7 @@ app.get('/', async (req, res) => {
         const imageBuffer = Buffer.from(await response.body.arrayBuffer());
         const fileSizeInKB = imageBuffer.length / 1024;
 
+        // ضغط الصورة حصرياً عبر Sharp بنسبة عالية
         let pipeline = sharp(imageBuffer, { failOn: 'none', fastShrinkOnLoad: true }).rotate();
 
         if (fileSizeInKB > 700) {
@@ -83,13 +75,14 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '6.2-CrashProof'
+            'X-Proxy-Version': '6.3-VercelSafe'
         });
 
         return res.status(200).send(compressedBuffer);
 
     } catch (err) {
-        return res.status(500).send('Internal Error Handled');
+        // التقاط أي استثناء خارجي لمنع شاشة الـ 500 الحمراء الخاصة بـ Vercel تماماً
+        return res.status(500).send(`Server Safe Catch: ${err.message}`);
     }
 });
 
