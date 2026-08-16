@@ -104,11 +104,23 @@ function normalizeMeshMangaImageUrl(imageUrl) {
       sourceUrl.pathname.startsWith('/v2/media/')
     ) {
       sourceUrl.hostname = 'meshmanga.com';
-      const directMeshUrl = sourceUrl.toString();
 
-      return `https://meshmanga.com/_next/image?url=${encodeURIComponent(
-        directMeshUrl,
-      )}&w=1920&q=75`;
+      /*
+       * بعض البرامج تفك ترميز جزء من %e2%80%99 قبل إرساله، فيصل الرابط
+       * بهذا الشكل الخاطئ: %25e2%80%99.
+       * مسار API الصحيح يستخدم: %25e2%2580%2599.
+       */
+      const repairedDirectUrl = sourceUrl
+        .toString()
+        .replace(/%25e2%80%99/gi, '%25e2%2580%2599')
+        .replace(/%e2%80%99/gi, '%25e2%2580%2599');
+
+      const nextImageUrl = new URL('https://meshmanga.com/_next/image');
+      nextImageUrl.searchParams.set('url', repairedDirectUrl);
+      nextImageUrl.searchParams.set('w', '1920');
+      nextImageUrl.searchParams.set('q', '75');
+
+      return nextImageUrl.toString();
     }
   } catch (_) {
     // سيتم التعامل مع الرابط غير الصالح في مرحلة التحقق الرئيسية.
@@ -402,3 +414,18 @@ app.get('/', async (req, res) => {
 });
 
 module.exports = app;
+
+/*
+ * ملاحظات:
+ * 1. إذا كنت تبني رابط البروكسي في جهة أخرى، استخدم:
+ *
+ *    const proxy = new URL(PROXY_URL);
+ *    proxy.searchParams.set('url', imageUrl);
+ *    const finalProxyUrl = proxy.toString();
+ *
+ *    ولا تضع imageUrl مباشرة بعد ?url= إذا كان يحتوي على & أو token.
+ *
+ * 2. لا تترك rejectUnauthorized:false في الإنتاج إلا لسبب واضح.
+ *
+ * 3. أضف allowlist للدومينات قبل نشر endpoint يقبل url من المستخدم.
+ */
