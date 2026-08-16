@@ -5,32 +5,35 @@ const sharp = require('sharp');
 const app = express();
 
 app.get('/', async (req, res) => {
-    const urlMatch = req.url.match(/[?&]url=([^&]*)/);
-    if (!urlMatch || !urlMatch[1]) {
-        return res.status(200).send('Enterprise Redirect-Fallback Proxy Active');
+    // استقبال الرابط مباشرة دون أي معالجة مسبقة للـ Express
+    const rawQuery = req.url.split('url=')[1];
+    if (!rawQuery) {
+        return res.status(200).send('v6.0-SafeProxy Active');
     }
 
-    const encodedUrlParam = urlMatch[1];
-    let targetUrlString;
+    // فك التشفير تدريجياً لضمان سلامة الرموز المزدوجة
+    let targetUrlString = rawQuery.split('&')[0];
     try {
-        targetUrlString = decodeURIComponent(encodedUrlParam);
+        targetUrlString = decodeURIComponent(targetUrlString);
+        // فك إضافي احتياطي إذا كان مشفراً مرتين بالكامل
+        if (targetUrlString.includes('%25')) {
+            targetUrlString = decodeURIComponent(targetUrlString);
+        }
     } catch (e) {
-        targetUrlString = encodedUrlParam;
+        targetUrlString = rawQuery;
     }
 
-    // إذا فشل البروكسي السحابي بسبب حظر الـ IP، وجه المتصفح للرابط الأصلي مباشرة ليعمل بدون أي ألوان حمراء
-    const fallbackRedirect = () => {
-        return res.redirect(302, targetUrlString);
-    };
+    // استخراج الهوست والمسار بدقة تامة وبشكل منفصل تماماً
+    let parsed;
+    try {
+        parsed = new URL(targetUrlString);
+    } catch (err) {
+        return res.status(400).send('Invalid URL Structure');
+    }
 
-    const isHttps = targetUrlString.startsWith('https');
-    const protoLength = isHttps ? 8 : 7;
-    const remainder = targetUrlString.substring(protoLength);
-    const firstSlash = remainder.indexOf('/');
-    
-    const hostname = firstSlash === -1 ? remainder : remainder.substring(0, firstSlash);
-    const rawPath = firstSlash === -1 ? '/' : remainder.substring(firstSlash);
-    const origin = `${isHttps ? 'https' : 'http'}://${hostname}`;
+    const origin = `${parsed.protocol}//${parsed.host}`;
+    // استخدام pathname و search معاً لضمان عدم ضياع أي جزء من مسار الفصل أو التوكنات
+    const fullPath = parsed.pathname + parsed.search;
 
     try {
         const requestHeaders = {
@@ -44,21 +47,23 @@ app.get('/', async (req, res) => {
             requestHeaders['Cookie'] = req.headers['cookie'];
         }
 
+        // تنفيذ الطلب عبر undici مع فصل الهوست عن المسار بدقة هندسية
         const response = await request(origin, {
-            path: rawPath,
+            path: fullPath,
             method: 'GET',
             headers: requestHeaders,
             maxRedirections: 5
         });
 
         if (response.statusCode >= 400) {
-            await response.body.text();
-            return fallbackRedirect();
+            const errorText = await response.body.text();
+            return res.status(response.statusCode).send(`Upstream Error (${response.statusCode}): ${errorText}`);
         }
 
         const imageBuffer = Buffer.from(await response.body.arrayBuffer());
         const fileSizeInKB = imageBuffer.length / 1024;
 
+        // ضغط الصورة حصرياً عبر Sharp
         let pipeline = sharp(imageBuffer, { failOn: 'none', fastShrinkOnLoad: true }).rotate();
 
         if (fileSizeInKB > 700) {
@@ -78,13 +83,13 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '5.2-SmartRedirect'
+            'X-Proxy-Version': '6.0-SafeProxy'
         });
 
         return res.status(200).send(compressedBuffer);
 
     } catch (err) {
-        return fallbackRedirect();
+        return res.status(500).send(`Proxy Internal Error: ${err.message}`);
     }
 });
 
