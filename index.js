@@ -6,31 +6,33 @@ const app = express();
 
 app.get('/', async (req, res) => {
     try {
-        // استخراج معامل الرابط بأمان تام
         const urlMatch = req.url.match(/[?&]url=([^&]*)/);
         if (!urlMatch || !urlMatch[1]) {
-            return res.status(200).send('v6.1-RobustProxy Active');
+            return res.status(200).send('v6.2-SafeActive');
         }
 
         const rawQuery = urlMatch[1];
-        let targetUrlString;
+        let targetUrlString = rawQuery;
         
+        // فك تشفير آمن 100% ومحمي ضد أي خطأ URIError قد يسبب انهيار السيرفر
         try {
             targetUrlString = decodeURIComponent(rawQuery);
-            // معالجة الرموز المزدوجة (%25) بأمان دون التسبب بانهيار
-            if (targetUrlString.includes('%25')) {
-                targetUrlString = decodeURIComponent(targetUrlString);
-            }
         } catch (e) {
             targetUrlString = rawQuery;
         }
 
-        // تحليل الرابط داخل try/catch لمنع أي Crash نهائياً
         let parsed;
         try {
             parsed = new URL(targetUrlString);
         } catch (err) {
-            return res.status(400).send('Invalid URL format');
+            // إذا فشل تحليل الرابط المباشر، جرب تحليله بعد فك إضافي حذر
+            try {
+                const secondDecode = decodeURIComponent(targetUrlString);
+                parsed = new URL(secondDecode);
+                targetUrlString = secondDecode;
+            } catch (innerErr) {
+                return res.status(400).send('Invalid URL');
+            }
         }
 
         const origin = `${parsed.protocol}//${parsed.host}`;
@@ -47,7 +49,6 @@ app.get('/', async (req, res) => {
             requestHeaders['Cookie'] = req.headers['cookie'];
         }
 
-        // جلب الصورة عبر محرك undici
         const response = await request(origin, {
             path: fullPath,
             method: 'GET',
@@ -56,14 +57,13 @@ app.get('/', async (req, res) => {
         });
 
         if (response.statusCode >= 400) {
-            const errorText = await response.body.text();
+            await response.body.text();
             return res.status(response.statusCode).send(`Upstream Error: ${response.statusCode}`);
         }
 
         const imageBuffer = Buffer.from(await response.body.arrayBuffer());
         const fileSizeInKB = imageBuffer.length / 1024;
 
-        // ضغط الصورة حصرياً عبر Sharp بنسبة عالية
         let pipeline = sharp(imageBuffer, { failOn: 'none', fastShrinkOnLoad: true }).rotate();
 
         if (fileSizeInKB > 700) {
@@ -83,14 +83,13 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '6.1-Robust'
+            'X-Proxy-Version': '6.2-CrashProof'
         });
 
         return res.status(200).send(compressedBuffer);
 
     } catch (err) {
-        // التقاط أي خطأ غير متوقع لمنع انهيار الـ Serverless Function تماماً
-        return res.status(500).send(`Internal Error: ${err.message}`);
+        return res.status(500).send('Internal Error Handled');
     }
 });
 
