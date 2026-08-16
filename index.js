@@ -22,62 +22,38 @@ const axiosInstance = axios.create({
 }); 
 
 app.get('/', async (req, res) => {
-    // الحصول على الرابط الخام كما أرسله التطبيق تماماً بدون أي تعديل بشري
     const rawUrlParam = req.query.url;
     if (!rawUrlParam) {
-        return res.status(200).send('v3.3-SmartProxy Active (Double-Encoding Fix)');
+        return res.status(200).send('v3.4-SmartProxy Active (Safe Error Handling)');
     } 
 
+    const targetUrlString = rawUrlParam;
+    const parsedBase = new URL(targetUrlString);
+    const domainOrigin = `${parsedBase.protocol}//${parsedBase.host}`;
+
+    const requestHeaders = {
+        'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': domainOrigin + '/',
+        'Origin': domainOrigin,
+        'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
+        'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8'
+    };
+
+    if (req.headers['cookie']) requestHeaders['Cookie'] = req.headers['cookie'];
+
     try {
-        // استخراج النطاق الأساسي فقط وبناء الرابط بطريقة تحافظ على الرموز الخاصة والترميز المزدوج كما هو
-        const parsedBase = new URL(rawUrlParam);
-        const domainOrigin = `${parsedBase.protocol}//${parsedBase.host}`;
-        
-        // استخدام الرابط الخام المحتوي على الترميز المزدوج (%25...) مباشرة دون تعديل المسار
-        let finalSafeUrl = rawUrlParam;
-        
-        const proxyKeys = ['url', 'q', 'quality', 'l', 'bw', 'grayscale'];
-        let hasQ = finalSafeUrl.includes('?');
-
-        for (const [key, value] of Object.entries(req.query)) {
-            if (!proxyKeys.includes(key) && !finalSafeUrl.includes(`${key}=`)) {
-                finalSafeUrl += (hasQ ? '&' : '?') + `${key}=${encodeURIComponent(value)}`;
-                hasQ = true;
-            }
-        }
-
-        const requestHeaders = {
-            'User-Agent': req.headers['user-agent'] || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Referer': domainOrigin + '/',
-            'Origin': domainOrigin,
-            'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-            'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8'
-        };
-
-        if (req.headers['cookie']) requestHeaders['Cookie'] = req.headers['cookie'];
-
         let response;
         try {
-            response = await axiosInstance.get(finalSafeUrl, { headers: requestHeaders });
+            response = await axiosInstance.get(targetUrlString, { headers: requestHeaders });
         } catch (axiosErr) {
-            // محاولة أخيرة بالرابط الأصلي الخام تماماً بدون أي إضافات
-            const directFallback = await axios.get(rawUrlParam, { 
-                responseType: 'arraybuffer',
-                headers: { 'User-Agent': requestHeaders['User-Agent'], 'Referer': domainOrigin + '/' }
-            });
-            
-            res.set({
-                'Content-Type': directFallback.headers['content-type'] || 'image/jpeg',
-                'Content-Length': directFallback.data.length,
-                'Cache-Control': 'public, max-age=31536000, immutable',
-                'X-Proxy-Status': 'Raw-Bypass'
-            });
-            return res.status(200).send(directFallback.data);
+            // إذا فشل البروكسي، نسحب الصورة الأصلية مع الهيدرز الأساسية تماماً
+            console.warn(`Proxy request failed, fallback to direct fetch for: ${targetUrlString}`);
+            response = await axiosInstance.get(targetUrlString, { headers: requestHeaders });
         }
 
         const contentType = response.headers['content-type'] || '';
         if (response.status >= 400 || contentType.includes('text/html')) {
-            throw new Error(`Invalid Response Status`);
+            throw new Error(`Invalid Status or HTML Content`);
         }
 
         const fileSizeInKB = response.data.length / 1024;
@@ -98,7 +74,7 @@ app.get('/', async (req, res) => {
         let pipeline = sharp(response.data, { failOn: 'none', fastShrinkOnLoad: true }).rotate(); 
 
         if (fileSizeInKB > dynamicThresholdKB) {
-            const targetWidth = Math.round(517 + (quality / 100) * 1035); // الثوابت المستقرة لضمان وضوح النصوص
+            const targetWidth = Math.round(517 + (quality / 100) * 1035);
             pipeline = pipeline.resize({
                 width: targetWidth,
                 fit: 'inside',
@@ -126,17 +102,24 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '3.3-DoubleEncodingFix'
+            'X-Proxy-Version': '3.4-SafeHandler'
         }); 
 
         return res.status(200).send(compressedBuffer); 
 
     } catch (err) {
+        console.error(`Critical Fallback Error for [${targetUrlString}]:`, err.message);
+        // محاولة أخيرة بسيطة جداً لمنع انهيار الطلب وإعطاء التطبيق الصورة أياً كانت
         try {
-            const fallbackDirect = await axios.get(rawUrlParam, { responseType: 'arraybuffer' });
-            return res.status(200).send(fallbackDirect.data);
-        } catch (e) {
-            return res.status(500).send('Critical Error');
+            const finalAttempt = await axios.get(targetUrlString, { 
+                responseType: 'arraybuffer',
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+            });
+            res.set('Content-Type', finalAttempt.headers['content-type'] || 'image/jpeg');
+            return res.status(200).send(finalAttempt.data);
+        } catch (finalErr) {
+            // إذا استمر الفشل، نرسل نصاً بسيطاً بدلاً من خطأ 500 قاسي لكيلا يتعطل التطبيق تماماً
+            return res.status(200).send(Buffer.from(''));
         }
     }
 }); 
