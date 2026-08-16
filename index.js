@@ -21,10 +21,24 @@ const axiosInstance = axios.create({
     httpsAgent
 }); 
 
+// دالة لتوليد صورة صالحة تماماً لمنع انهيار الـ Decoder
+async function generateEmergencyPlaceholder() {
+    return await sharp({
+        create: {
+            width: 400,
+            height: 300,
+            channels: 3,
+            background: { r: 20, g: 20, b: 20 }
+        }
+    })
+    .jpeg()
+    .toBuffer();
+}
+
 app.get('/', async (req, res) => {
     const rawUrlParam = req.query.url;
     if (!rawUrlParam) {
-        return res.status(200).send('v3.4-SmartProxy Active (Safe Error Handling)');
+        return res.status(200).send('v3.5-SmartProxy Active (Decoder Safe)');
     } 
 
     const targetUrlString = rawUrlParam;
@@ -46,8 +60,6 @@ app.get('/', async (req, res) => {
         try {
             response = await axiosInstance.get(targetUrlString, { headers: requestHeaders });
         } catch (axiosErr) {
-            // إذا فشل البروكسي، نسحب الصورة الأصلية مع الهيدرز الأساسية تماماً
-            console.warn(`Proxy request failed, fallback to direct fetch for: ${targetUrlString}`);
             response = await axiosInstance.get(targetUrlString, { headers: requestHeaders });
         }
 
@@ -102,24 +114,30 @@ app.get('/', async (req, res) => {
             'Content-Type': 'image/jpeg',
             'Content-Length': compressedBuffer.length,
             'Cache-Control': 'public, max-age=31536000, immutable',
-            'X-Proxy-Version': '3.4-SafeHandler'
+            'X-Proxy-Version': '3.5-DecoderSafe'
         }); 
 
         return res.status(200).send(compressedBuffer); 
 
     } catch (err) {
-        console.error(`Critical Fallback Error for [${targetUrlString}]:`, err.message);
-        // محاولة أخيرة بسيطة جداً لمنع انهيار الطلب وإعطاء التطبيق الصورة أياً كانت
+        console.error(`Decoder Safe Fallback triggered for [${targetUrlString}]`);
         try {
+            // محاولة جلب الصورة الأصلية مباشرة
             const finalAttempt = await axios.get(targetUrlString, { 
                 responseType: 'arraybuffer',
-                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36' }
+                headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36', 'Referer': domainOrigin + '/' }
             });
-            res.set('Content-Type', finalAttempt.headers['content-type'] || 'image/jpeg');
+            res.set('Content-Type', 'image/jpeg');
             return res.status(200).send(finalAttempt.data);
         } catch (finalErr) {
-            // إذا استمر الفشل، نرسل نصاً بسيطاً بدلاً من خطأ 500 قاسي لكيلا يتعطل التطبيق تماماً
-            return res.status(200).send(Buffer.from(''));
+            // ضمان إرسال صورة صالحة تماماً وليست فارغة لمنع الـ Crash
+            const safeBuffer = await generateEmergencyPlaceholder();
+            res.set({
+                'Content-Type': 'image/jpeg',
+                'Content-Length': safeBuffer.length,
+                'X-Proxy-Status': 'Emergency-Placeholder'
+            });
+            return res.status(200).send(safeBuffer);
         }
     }
 }); 
