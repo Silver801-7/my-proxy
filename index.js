@@ -281,6 +281,12 @@ app.get('/', async (req, res) => {
       requestHeaders.Referer = upstreamReferer;
     }
 
+    /* تجربة خاصة بصور MangaTek فقط؛ لا تؤثر على MeshManga أو المواقع الأخرى. */
+    if (parsedUrl.hostname.toLowerCase() === 'img.mangatek.com') {
+      requestHeaders.Referer = 'https://mangatek.com/';
+      requestHeaders.Origin = 'https://mangatek.com';
+    }
+
     /* لا تمرر Cookie إلا عند تفعيله صراحةً. */
     if (process.env.FORWARD_UPSTREAM_COOKIE === 'true' && req.headers.cookie) {
       requestHeaders.Cookie = req.headers.cookie;
