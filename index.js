@@ -210,7 +210,7 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v2.8-SmartProxy-Debuggable');
+    return res.status(200).send('v2.9-MultiFallback');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -476,7 +476,7 @@ app.get('/', async (req, res) => {
      */
     if (req.query.debug === '1' || req.query.debug === 'true') {
       return res.status(502).json({
-        proxyVersion: '2.8-Debuggable',
+        proxyVersion: '2.9-MultiFallback',
         requestedUrl: imageUrl,
         upstreamUrl: upstreamImageUrl,
         attempts: attemptedUpstreams,
@@ -504,7 +504,7 @@ app.get('/', async (req, res) => {
         'Content-Type': 'image/jpeg',
         'Content-Length': fallbackBuffer.length,
         'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'X-Proxy-Version': '2.8-Debuggable',
+        'X-Proxy-Version': '2.9-MultiFallback',
         'X-Proxy-Status': 'Error-Report',
         'X-Proxy-Debug': `ERROR|attempts=${attemptedUpstreams.length}|status=${errorStatus}|message=${encodeURIComponent(errorMessage.slice(0, 140))}`,
         'X-Proxy-Error': encodeURIComponent(errorMessage.slice(0, 180)),
