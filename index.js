@@ -533,4 +533,5 @@ module.exports = app;
  *
  * 2. لا تترك rejectUnauthorized:false في الإنتاج إلا لسبب واضح.
  *
- * 3. أضف allowlist للدومينات قبل نشر endpoint يقبل 
+ * 3. أضف allowlist للدومينات قبل نشر endpoint يقبل
+ */
