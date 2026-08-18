@@ -106,10 +106,16 @@ function normalizeMeshMangaImageUrl(imageUrl) {
       sourceUrl.hostname = 'meshmanga.com';
 
       /*
-       * بعض البرامج تفك ترميز جزء من %e2%80%99 قبل إرساله، فيصل الرابط
-       * بهذا الشكل الخاطئ: %25e2%80%99.
-       * مسار API الصحيح يستخدم: %25e2%2580%2599.
+       * بعض إضافات Tachiyomi تفك ترميز اسم السلسلة العربية مرة واحدة،
+       * فيصل الرابط بصيغة %d8... بدلاً من %25d8.... نعيد ترميز أي
+       * octet مفكوك داخل المسار، مع ترك %25 الموجود أصلاً دون تغيير.
        */
+      sourceUrl.pathname = sourceUrl.pathname.replace(
+        /%(?!25)([0-9a-f]{2})/gi,
+        '%25$1',
+      );
+
+      /* توافق إضافي مع الترميز المختلط القديم لعلامة الاقتباس. */
       const repairedDirectUrl = sourceUrl
         .toString()
         .replace(/%25e2%80%99/gi, '%25e2%2580%2599')
@@ -311,7 +317,7 @@ app.get('/', async (req, res) => {
 
     const fileSizeInKB = responseBuffer.length / 1024;
     const quality = getQuality(req);
-    const dynamicThresholdKB = 650 + (quality - 10) * 8;
+    const dynamicThresholdKB = 680 + (quality - 10) * 8;
 
     const isGrayscale =
       req.query.bw === '1' ||
@@ -323,18 +329,9 @@ app.get('/', async (req, res) => {
       fastShrinkOnLoad: true,
     }).rotate();
 
-    const targetWidth = Math.round(495 + (quality / 100) * 970);
-    const shouldResize =
-      fileSizeInKB > dynamicThresholdKB ||
-      (metadata.width && metadata.width > targetWidth);
+    if (fileSizeInKB > dynamicThresholdKB) {
+      const targetWidth = Math.round(500 + (quality / 100) * 1000);
 
-    /*
-     * الشرط الأصلي كان يعتمد على الحجم فقط. بعد استخدام Next Image قد
-     * تصبح الصورة أصغر من threshold بالبايت مع بقائها بعرض 1920px،
-     * فتتجاوز صفحات الفصل الحجم المطلوب. نضيف فحص العرض مع الحفاظ على
-     * نفس targetWidth ونفس بقية ثوابت الضغط.
-     */
-    if (shouldResize) {
       pipeline = pipeline.resize({
         width: targetWidth,
         fit: 'inside',
