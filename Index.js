@@ -6,19 +6,11 @@ const https = require('https');
 
 const app = express();
 
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 50,
-});
-
-const httpsAgent = new https.Agent({
-  keepAlive: true,
-  maxSockets: 50,
-  rejectUnauthorized: false,
-});
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, rejectUnauthorized: false });
 
 const axiosInstance = axios.create({
-  timeout: 15000,
+  timeout: 20000,
   responseType: 'arraybuffer',
   httpAgent,
   httpsAgent,
@@ -37,39 +29,15 @@ function getErrorText(error) {
   return String(error?.message || error || 'Unknown Error');
 }
 
-function getFallbackColor(error) {
-  const message = getErrorText(error);
-  const status = Number(
-    error?.upstreamStatus || error?.response?.status || 0,
-  );
-
-  if (status === 404 || /\b404\b|not found/i.test(message)) {
-    return '#FF4444';
-  }
-
-  if (status === 403 || /\b403\b|forbidden|cloudflare/i.test(message)) {
-    return '#FF8C00';
-  }
-
-  if (/timeout|ETIMEDOUT|ECONNABORTED/i.test(message)) {
-    return '#FFCC00';
-  }
-
-  return '#111111';
-}
-
+// تم تعديل لون الخطأ ليصبح رمادياً داكناً أو أسود ليناسب جو القراءة الليلية بدلاً من الأصفر المزعج
 async function getFallbackImage(error) {
-  const bgColor = getFallbackColor(error);
-
   const svgText = `
-    <svg width="600" height="400" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" fill="${bgColor}"/>
+    <svg width="600" height="800" xmlns="http://www.w3.org/2000/svg">
+      <rect width="100%" height="100%" fill="#1a1a1a"/>
+      <text x="50%" y="50%" fill="#888888" font-size="24" font-family="Arial" text-anchor="middle">Failed to Load Manga Page</text>
     </svg>
   `;
-
-  return sharp(Buffer.from(svgText))
-    .jpeg({ quality: 80 })
-    .toBuffer();
+  return sharp(Buffer.from(svgText)).jpeg({ quality: 80 }).toBuffer();
 }
 
 function buildCandidateImageUrls(imageUrl) {
@@ -91,23 +59,20 @@ function buildCandidateImageUrls(imageUrl) {
       sourceUrl.pathname.startsWith('/v2/media/')
     ) {
       sourceUrl.hostname = 'meshmanga.com';
-
-      sourceUrl.pathname = sourceUrl.pathname.replace(
-        /%(?!25)([0-9a-f]{2})/gi,
-        '%25$1',
-      );
-
-      const repairedDirectUrl = sourceUrl
-        .toString()
-        .replace(/%25e2%80%99/gi, '%25e2%2580%2599')
-        .replace(/%e2%80%99/gi, '%25e2%2580%2599');
-
+      sourceUrl.pathname = sourceUrl.pathname.replace(/%(?!25)([0-9a-f]{2})/gi, '%25$1');
+      const repairedDirectUrl = sourceUrl.toString();
       add(repairedDirectUrl);
 
+      // إضافة وسيط مجاني خارجي لتجاوز حظر Cloudflare/Datacenter الخاص بـ Vercel
+      const proxyWrapped = `https://corsproxy.io/?${encodeURIComponent(repairedDirectUrl)}`;
+      add(proxyWrapped);
+
+      const altProxyWrapped = `https://api.allorigins.win/raw?url=${encodeURIComponent(repairedDirectUrl)}`;
+      add(altProxyWrapped);
+
       const mediatorProfiles = [
-        { width: '3840', quality: '100' },
-        { width: '1920', quality: '100' },
-        { width: '1920', quality: '75' },
+        { width: '1920', quality: '85' },
+        { width: '1280', quality: '80' }
       ];
 
       for (const profile of mediatorProfiles) {
@@ -123,46 +88,15 @@ function buildCandidateImageUrls(imageUrl) {
   return candidates;
 }
 
-async function makeGrayscaleWithoutResize(buffer, format) {
-  const pipeline = sharp(buffer, { failOn: 'none' }).grayscale().flatten({ background: '#ffffff' }).toColourspace('srgb');
-
-  switch (String(format || '').toLowerCase()) {
-    case 'png':
-      return { buffer: await pipeline.png().toBuffer(), contentType: 'image/png' };
-    case 'webp':
-      return {
-        buffer: await pipeline.webp({ lossless: true }).toBuffer(),
-        contentType: 'image/webp',
-      };
-    case 'jpeg':
-    case 'jpg':
-      return {
-        buffer: await pipeline
-          .jpeg({ quality: 100, chromaSubsampling: '4:4:4', progressive: true })
-          .toBuffer(),
-        contentType: 'image/jpeg',
-      };
-    default:
-      return { buffer: await pipeline.png().toBuffer(), contentType: 'image/png' };
-  }
-}
-
 function getQuality(req) {
-  const rawQuality =
-    req.query.q ||
-    req.query.quality ||
-    req.query.l ||
-    req.headers['x-image-quality'];
-
+  const rawQuality = req.query.q || req.query.quality || req.query.l || req.headers['x-image-quality'];
   let quality = 40;
-
   if (rawQuality !== undefined && rawQuality !== null && rawQuality !== '') {
     quality = Number.parseInt(rawQuality, 10);
     if (Number.isNaN(quality)) quality = 40;
     if (quality === 40) quality = 30;
     quality = Math.max(1, Math.min(100, quality));
   }
-
   return quality;
 }
 
@@ -170,35 +104,21 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v3.1-VercelHybridCache Active');
+    return res.status(200).send('v3.2-HybridProxyBypass Active');
   }
 
   if (typeof imageUrl !== 'string') {
-    const error = new Error('Invalid url parameter');
-    const fallbackBuffer = await getFallbackImage(error);
-    res.set({
-      'Content-Type': 'image/jpeg',
-      'Content-Length': fallbackBuffer.length,
-      'Cache-Control': 'no-cache',
-      'X-Proxy-Status': 'Invalid-URL',
-    });
+    const fallbackBuffer = await getFallbackImage(new Error('Invalid URL'));
+    res.setHeader('Content-Type', 'image/jpeg');
     return res.status(200).send(fallbackBuffer);
   }
 
   let parsedUrl;
   try {
     parsedUrl = new URL(imageUrl);
-    if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      throw new Error('Only HTTP and HTTPS URLs are allowed');
-    }
   } catch (error) {
     const fallbackBuffer = await getFallbackImage(error);
-    res.set({
-      'Content-Type': 'image/jpeg',
-      'Content-Length': fallbackBuffer.length,
-      'Cache-Control': 'no-cache',
-      'X-Proxy-Status': 'Invalid-URL',
-    });
+    res.setHeader('Content-Type', 'image/jpeg');
     return res.status(200).send(fallbackBuffer);
   }
 
@@ -207,21 +127,12 @@ app.get('/', async (req, res) => {
 
   try {
     const domainOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
-
-    // ترويسات متصفح محسنة متوافقة مع Vercel
     const requestHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-      'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
       'Referer': `${domainOrigin}/`,
       'Origin': domainOrigin,
-      'Sec-Fetch-Dest': 'image',
-      'Sec-Fetch-Mode': 'no-cors',
-      'Sec-Fetch-Site': 'cross-site'
     };
-
-    const upstreamReferer = typeof req.query.referer === 'string' ? req.query.referer : process.env.UPSTREAM_REFERER;
-    if (upstreamReferer) requestHeaders.Referer = upstreamReferer;
 
     const candidateUrls = buildCandidateImageUrls(imageUrl);
     attemptedUpstreams = candidateUrls;
@@ -229,7 +140,6 @@ app.get('/', async (req, res) => {
     let response = null;
     let responseBuffer = null;
     let contentType = '';
-    let finalUrl = '';
     let metadata = null;
     let lastCandidateError = null;
 
@@ -245,89 +155,46 @@ app.get('/', async (req, res) => {
         const candidateBuffer = Buffer.isBuffer(candidateResponse.data) ? candidateResponse.data : Buffer.from(candidateResponse.data || '');
 
         if (candidateResponse.status < 200 || candidateResponse.status >= 300) {
-          throw new UpstreamError(`Upstream HTTP ${candidateResponse.status}`, candidateResponse.status);
+          throw new UpstreamError(`HTTP ${candidateResponse.status}`, candidateResponse.status);
         }
 
-        if (candidateBuffer.length === 0) {
-          throw new UpstreamError('Empty response', candidateResponse.status);
+        if (candidateBuffer.length < 500) {
+          // إذا كان الحجم صغيراً جداً، فهذه صورة حماية وهمية وليست صفحة مانجا
+          throw new UpstreamError('Protected placeholder detected', 200);
         }
 
         if (candidateContentType.includes('text/html')) {
-          throw new UpstreamError(`Invalid Content-Type: ${candidateContentType}`, candidateResponse.status);
+          throw new UpstreamError('HTML page returned instead of image', 200);
         }
 
         let candidateMetadata;
         try {
           candidateMetadata = await sharp(candidateBuffer, { failOn: 'none' }).metadata();
-        } catch (error) {
-          throw new UpstreamError(`Invalid image payload: ${error.message}`, candidateResponse.status);
+        } catch (err) {
+          throw new UpstreamError(`Invalid image payload: ${err.message}`, 200);
         }
 
         if (!candidateMetadata.format) {
-          throw new UpstreamError('Missing image format', candidateResponse.status);
+          throw new UpstreamError('Missing image format', 200);
         }
 
         response = candidateResponse;
         responseBuffer = candidateBuffer;
         contentType = candidateContentType;
         metadata = candidateMetadata;
-        finalUrl = candidateResponse.request?.res?.responseUrl || candidateUrl;
-
         break;
-      } catch (candidateError) {
-        lastCandidateError = candidateError;
+      } catch (err) {
+        lastCandidateError = err;
       }
     }
 
     if (!response || !responseBuffer || !metadata) {
-      throw lastCandidateError || new UpstreamError('All image candidates failed');
-    }
-
-    const fileSizeInKB = responseBuffer.length / 1024;
-
-    // **الفحص الذكي للصور الوهمية الصفراء أو الفارغة**:
-    // إذا كان حجم الصورة صغير جداً بشكل مريب (أقل من 2 كيلوبايت)، فهذا يعني أن سيرفر المانجا أرسل صورة الحماية الصفراء الوهمية.
-    // في هذه الحالة، سنقوم بتجاوز الضغط الخاطئ وإرجاع البيانات بنجاح أو تمريرها لتجنب الانهيار.
-    if (fileSizeInKB < 2) {
-      res.set({
-        'Content-Type': contentType || 'image/webp',
-        'Content-Length': responseBuffer.length,
-        'Cache-Control': 'public, max-age=3600',
-        'X-Proxy-Version': '3.1-VercelHybridCache',
-        'X-Proxy-Warning': 'Protected-Placeholder-Detected'
-      });
-      return res.status(200).send(responseBuffer);
+      throw lastCandidateError || new UpstreamError('All candidates failed');
     }
 
     const quality = getQuality(req);
-    const dynamicThresholdKB = 444 + (quality - 10) * 8;
     const isGrayscale = req.query.bw === '1' || req.query.bw === 'true' || req.query.grayscale === '1';
-    const shouldResize = fileSizeInKB > dynamicThresholdKB;
 
-    if (!shouldResize && !isGrayscale) {
-      res.set({
-        'Content-Type': contentType || 'application/octet-stream',
-        'Content-Length': responseBuffer.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '3.1-VercelHybridCache',
-        'X-Source-Format': metadata.format,
-      });
-      return res.status(200).send(responseBuffer);
-    }
-
-    if (!shouldResize && isGrayscale) {
-      const gray = await makeGrayscaleWithoutResize(responseBuffer, metadata.format);
-      res.set({
-        'Content-Type': gray.contentType,
-        'Content-Length': gray.buffer.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '3.1-VercelHybridCache',
-        'X-Source-Format': metadata.format,
-      });
-      return res.status(200).send(gray.buffer);
-    }
-
-    // معالجة وضغط الصورة بـ Sharp مع تثبيت الألوان (منع الاصفرار الناتج عن الشفافية)
     let pipeline = sharp(responseBuffer, {
       failOn: 'none',
       fastShrinkOnLoad: true,
@@ -354,8 +221,6 @@ app.get('/', async (req, res) => {
         mozjpeg: true,
         progressive: true,
         chromaSubsampling: quality < 50 ? '4:2:0' : '4:4:4',
-        trellisQuantisation: true,
-        overshootDeringing: true,
       })
       .toBuffer();
 
@@ -363,40 +228,22 @@ app.get('/', async (req, res) => {
       'Content-Type': 'image/jpeg',
       'Content-Length': compressedBuffer.length,
       'Cache-Control': 'public, max-age=31536000, immutable',
-      'X-Proxy-Version': '3.1-VercelHybridCache',
-      'X-Source-Format': metadata.format,
+      'X-Proxy-Version': '3.2-HybridProxyBypass',
     });
 
     return res.status(200).send(compressedBuffer);
 
   } catch (error) {
-    const errorStatus = error.upstreamStatus || error.response?.status || 0;
-    const errorMessage = error.message || 'Fetch Failed';
-
-    if (req.query.debug === '1' || req.query.debug === 'true') {
-      return res.status(502).json({
-        proxyVersion: '3.1-VercelHybridCache',
-        requestedUrl: imageUrl,
-        upstreamUrl: upstreamImageUrl,
-        status: errorStatus,
-        message: errorMessage,
-      });
-    }
-
-    try {
-      const fallbackBuffer = await getFallbackImage(error);
-      res.set({
-        'Content-Type': 'image/jpeg',
-        'Content-Length': fallbackBuffer.length,
-        'Cache-Control': 'no-cache',
-        'X-Proxy-Version': '3.1-VercelHybridCache',
-        'X-Proxy-Status': 'Error-Report',
-      });
-      return res.status(200).send(fallbackBuffer);
-    } catch (fallbackError) {
-      return res.status(500).send('Critical Error');
-    }
+    const fallbackBuffer = await getFallbackImage(error);
+    res.set({
+      'Content-Type': 'image/jpeg',
+      'Content-Length': fallbackBuffer.length,
+      'Cache-Control': 'no-cache',
+      'X-Proxy-Status': 'Error-Fallback',
+    });
+    return res.status(200).send(fallbackBuffer);
   }
 });
 
+app.listen(process.env.PORT || 3000);
 module.exports = app;
