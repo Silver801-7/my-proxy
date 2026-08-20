@@ -6,7 +6,6 @@ const https = require('https');
 
 const app = express();
 
-// إعدادات الاتصال السريع
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 50 });
 const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 50, rejectUnauthorized: false });
 
@@ -18,58 +17,52 @@ const axiosInstance = axios.create({
   validateStatus: () => true,
 });
 
-// الرابط الخاص بك الذي يعمل كجسر لتجاوز الحظر
-const WORKER_PROXY_URL = 'https://my-proxy.ymasalqp-000.workers.dev/?url=';
-
-// دالة لصورة الخطأ
-async function getFallbackImage() {
-  const svgText = `
-    <svg width="600" height="800" xmlns="http://www.w3.org/2000/svg">
-      <rect width="100%" height="100%" fill="#1a1a1a"/>
-      <text x="50%" y="50%" fill="#888888" font-size="24" font-family="Arial" text-anchor="middle">Failed to Load Manga</text>
-    </svg>
-  `;
-  return sharp(Buffer.from(svgText)).jpeg({ quality: 80 }).toBuffer();
-}
-
 app.get('/', async (req, res) => {
-  const imageUrl = req.query.url;
+  // Bandwidth Hero يرسل رابط الصورة عبر الباراميتر url أو l
+  const imageUrl = req.query.url || req.query.l;
 
   if (!imageUrl) {
-    return res.status(200).send('v3.5-BridgeActive: All systems operational.');
+    return res.status(200).send('Bandwidth Hero Proxy Active');
   }
 
   try {
-    // توجيه الطلب عبر Worker الخاص بك حصرياً
-    const finalProxyCall = WORKER_PROXY_URL + encodeURIComponent(imageUrl);
-    const response = await axiosInstance.get(finalProxyCall);
+    // جلب الصورة مباشرة مع ترويسات تبدو كمتصفح حقيقي لتجاوز الحظر قدر الإمكان
+    const response = await axiosInstance.get(imageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/124.0.0.0 Safari/537.36',
+        'Referer': 'https://mangatek.com/',
+        'Origin': 'https://mangatek.com/'
+      }
+    });
 
-    if (response.status !== 200 || response.data.length < 1024) {
-      throw new Error('Blocked image');
+    if (response.status !== 200 || !response.data) {
+      throw new Error('Failed to fetch');
     }
 
-    // ضغط ومعالجة الصورة لضمان أفضل سرعة على Tachiyomi
-    let pipeline = sharp(response.data, { failOn: 'none' })
+    // ضغط الصورة عبر Sharp لتقليل حجمها إلى النصف أو الربع لتوفير باقة الإنترنت
+    const compressedBuffer = await sharp(response.data, { failOn: 'none' })
       .rotate()
-      .flatten({ background: '#ffffff' });
-
-    const compressedBuffer = await pipeline
-      .resize({ width: 1200, fit: 'inside', withoutEnlargement: true })
-      .jpeg({ quality: 40, mozjpeg: true, progressive: true })
+      .resize({ width: 1000, fit: 'inside', withoutEnlargement: true })
+      .jpeg({ quality: 40, mozjpeg: true })
       .toBuffer();
 
     res.set({
       'Content-Type': 'image/jpeg',
       'Content-Length': compressedBuffer.length,
-      'Cache-Control': 'public, max-age=31536000, immutable',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'public, max-age=31536000',
     });
 
     return res.status(200).send(compressedBuffer);
 
-  } catch (error) {
-    const fallbackBuffer = await getFallbackImage();
-    res.set({ 'Content-Type': 'image/jpeg' });
-    return res.status(200).send(fallbackBuffer);
+  } catch (err) {
+    // في حال حدث حظر، أعد توجيه الصورة الأصلية مباشرة للتطبيق لكي لا يتوقف الفصل عن الظهور
+    try {
+      const fallbackRes = await axiosInstance.get(imageUrl);
+      return res.status(200).send(fallbackRes.data);
+    } catch (e) {
+      return res.status(404).send('Error loading image');
+    }
   }
 });
 
