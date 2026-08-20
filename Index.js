@@ -25,11 +25,7 @@ class UpstreamError extends Error {
   }
 }
 
-function getErrorText(error) {
-  return String(error?.message || error || 'Unknown Error');
-}
-
-// تم تعديل لون الخطأ ليصبح رمادياً داكناً أو أسود ليناسب جو القراءة الليلية بدلاً من الأصفر المزعج
+// دالة توليد صورة خطأ داكنة ومريحة للعين في حال فشل الجلب النهائي
 async function getFallbackImage(error) {
   const svgText = `
     <svg width="600" height="800" xmlns="http://www.w3.org/2000/svg">
@@ -40,6 +36,7 @@ async function getFallbackImage(error) {
   return sharp(Buffer.from(svgText)).jpeg({ quality: 80 }).toBuffer();
 }
 
+// بناء الروابط البديلة واستهداف CDN مانجا تك مباشرة
 function buildCandidateImageUrls(imageUrl) {
   const candidates = [];
   const add = (value) => {
@@ -54,34 +51,11 @@ function buildCandidateImageUrls(imageUrl) {
     const sourceUrl = new URL(imageUrl);
     const host = sourceUrl.hostname.toLowerCase();
 
-    if (
-      (host === 'appswat.com' || host === 'meshmanga.com') &&
-      sourceUrl.pathname.startsWith('/v2/media/')
-    ) {
-      sourceUrl.hostname = 'meshmanga.com';
-      sourceUrl.pathname = sourceUrl.pathname.replace(/%(?!25)([0-9a-f]{2})/gi, '%25$1');
-      const repairedDirectUrl = sourceUrl.toString();
-      add(repairedDirectUrl);
-
-      // إضافة وسيط مجاني خارجي لتجاوز حظر Cloudflare/Datacenter الخاص بـ Vercel
-      const proxyWrapped = `https://corsproxy.io/?${encodeURIComponent(repairedDirectUrl)}`;
-      add(proxyWrapped);
-
-      const altProxyWrapped = `https://api.allorigins.win/raw?url=${encodeURIComponent(repairedDirectUrl)}`;
-      add(altProxyWrapped);
-
-      const mediatorProfiles = [
-        { width: '1920', quality: '85' },
-        { width: '1280', quality: '80' }
-      ];
-
-      for (const profile of mediatorProfiles) {
-        const nextImageUrl = new URL('https://meshmanga.com/_next/image');
-        nextImageUrl.searchParams.set('url', repairedDirectUrl);
-        nextImageUrl.searchParams.set('w', profile.width);
-        nextImageUrl.searchParams.set('q', profile.quality);
-        add(nextImageUrl.toString());
-      }
+    // إذا كانت الصورة تابعة لشبكة مانجا تك
+    if (host.includes('mangatek.com')) {
+      // التأكد من استخدام HTTPS ورابط نظيف
+      sourceUrl.protocol = 'https:';
+      add(sourceUrl.toString());
     }
   } catch (_) {}
 
@@ -104,7 +78,7 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v3.2-HybridProxyBypass Active');
+    return res.status(200).send('v3.3-MangatekDirectCDN Active');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -126,12 +100,18 @@ app.get('/', async (req, res) => {
   let attemptedUpstreams = [];
 
   try {
-    const domainOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
+    // تحديد نطاق الإحالة الصحيح لخداع حماية الـ Hotlink
     const requestHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
-      'Referer': `${domainOrigin}/`,
-      'Origin': domainOrigin,
+      'Referer': 'https://mangatek.com/',
+      'Origin': 'https://mangatek.com/',
+      'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
+      'Sec-Ch-Ua-Mobile': '?0',
+      'Sec-Ch-Ua-Platform': '"Windows"',
+      'Sec-Fetch-Dest': 'image',
+      'Sec-Fetch-Mode': 'no-cors',
+      'Sec-Fetch-Site': 'cross-site'
     };
 
     const candidateUrls = buildCandidateImageUrls(imageUrl);
@@ -158,9 +138,9 @@ app.get('/', async (req, res) => {
           throw new UpstreamError(`HTTP ${candidateResponse.status}`, candidateResponse.status);
         }
 
-        if (candidateBuffer.length < 500) {
-          // إذا كان الحجم صغيراً جداً، فهذه صورة حماية وهمية وليست صفحة مانجا
-          throw new UpstreamError('Protected placeholder detected', 200);
+        // فحص حجم الصورة لكشف صور الحماية الوهمية (الصفراء) التي عادة ما تكون صغيرة جداً
+        if (candidateBuffer.length < 2048) {
+          throw new UpstreamError('Protected placeholder or blocked image received', 200);
         }
 
         if (candidateContentType.includes('text/html')) {
@@ -195,6 +175,7 @@ app.get('/', async (req, res) => {
     const quality = getQuality(req);
     const isGrayscale = req.query.bw === '1' || req.query.bw === 'true' || req.query.grayscale === '1';
 
+    // معالجة وضغط الصورة عبر Sharp وتثبيت الخلفية البيضاء لمنع الاصفرار
     let pipeline = sharp(responseBuffer, {
       failOn: 'none',
       fastShrinkOnLoad: true,
@@ -228,7 +209,7 @@ app.get('/', async (req, res) => {
       'Content-Type': 'image/jpeg',
       'Content-Length': compressedBuffer.length,
       'Cache-Control': 'public, max-age=31536000, immutable',
-      'X-Proxy-Version': '3.2-HybridProxyBypass',
+      'X-Proxy-Version': '3.3-MangatekDirectCDN',
     });
 
     return res.status(200).send(compressedBuffer);
