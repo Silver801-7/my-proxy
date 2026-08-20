@@ -55,10 +55,6 @@ function getFallbackColor(error) {
     return '#FFCC00';
   }
 
-  if (/Content-Type|HTML|not an image|Invalid image|unsupported image/i.test(message)) {
-    return '#00AAFF';
-  }
-
   return '#111111';
 }
 
@@ -138,11 +134,6 @@ async function makeGrayscaleWithoutResize(buffer, format) {
         buffer: await pipeline.webp({ lossless: true }).toBuffer(),
         contentType: 'image/webp',
       };
-    case 'tiff':
-      return {
-        buffer: await pipeline.tiff({ compression: 'lzw' }).toBuffer(),
-        contentType: 'image/tiff',
-      };
     case 'jpeg':
     case 'jpg':
       return {
@@ -167,15 +158,8 @@ function getQuality(req) {
 
   if (rawQuality !== undefined && rawQuality !== null && rawQuality !== '') {
     quality = Number.parseInt(rawQuality, 10);
-
-    if (Number.isNaN(quality)) {
-      quality = 40;
-    }
-
-    if (quality === 40) {
-      quality = 30;
-    }
-
+    if (Number.isNaN(quality)) quality = 40;
+    if (quality === 40) quality = 30;
     quality = Math.max(1, Math.min(100, quality));
   }
 
@@ -186,41 +170,35 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v3.0-StealthBrowserMimic');
+    return res.status(200).send('v3.1-VercelHybridCache Active');
   }
 
   if (typeof imageUrl !== 'string') {
     const error = new Error('Invalid url parameter');
     const fallbackBuffer = await getFallbackImage(error);
-
     res.set({
       'Content-Type': 'image/jpeg',
       'Content-Length': fallbackBuffer.length,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Cache-Control': 'no-cache',
       'X-Proxy-Status': 'Invalid-URL',
     });
-
     return res.status(200).send(fallbackBuffer);
   }
 
   let parsedUrl;
-
   try {
     parsedUrl = new URL(imageUrl);
-
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
       throw new Error('Only HTTP and HTTPS URLs are allowed');
     }
   } catch (error) {
     const fallbackBuffer = await getFallbackImage(error);
-
     res.set({
       'Content-Type': 'image/jpeg',
       'Content-Length': fallbackBuffer.length,
-      'Cache-Control': 'no-cache, no-store, must-revalidate',
+      'Cache-Control': 'no-cache',
       'X-Proxy-Status': 'Invalid-URL',
     });
-
     return res.status(200).send(fallbackBuffer);
   }
 
@@ -230,36 +208,20 @@ app.get('/', async (req, res) => {
   try {
     const domainOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
 
-    // **محاكاة بصمة المتصفح المتقدمة (Stealth Headers)** لتخطي حراسة مواقع المانجا وسيرفرات الـ CDN
+    // ترويسات متصفح محسنة متوافقة مع Vercel
     const requestHeaders = {
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       'Accept': 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
       'Referer': `${domainOrigin}/`,
       'Origin': domainOrigin,
-      'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-      'Sec-Ch-Ua-Mobile': '?0',
-      'Sec-Ch-Ua-Platform': '"Windows"',
       'Sec-Fetch-Dest': 'image',
       'Sec-Fetch-Mode': 'no-cors',
-      'Sec-Fetch-Site': 'cross-site',
-      'Cache-Control': 'no-cache',
-      'Pragma': 'no-cache'
+      'Sec-Fetch-Site': 'cross-site'
     };
 
-    const upstreamReferer =
-      typeof req.query.referer === 'string'
-        ? req.query.referer
-        : process.env.UPSTREAM_REFERER;
-
-    if (upstreamReferer) {
-      requestHeaders.Referer = upstreamReferer;
-    }
-
-    if (process.env.FORWARD_UPSTREAM_COOKIE === 'true' && req.headers.cookie) {
-      requestHeaders.Cookie = req.headers.cookie;
-    }
+    const upstreamReferer = typeof req.query.referer === 'string' ? req.query.referer : process.env.UPSTREAM_REFERER;
+    if (upstreamReferer) requestHeaders.Referer = upstreamReferer;
 
     const candidateUrls = buildCandidateImageUrls(imageUrl);
     attemptedUpstreams = candidateUrls;
@@ -279,55 +241,30 @@ app.get('/', async (req, res) => {
           headers: requestHeaders,
         });
 
-        const candidateContentType = String(
-          candidateResponse.headers['content-type'] || '',
-        )
-          .split(';', 1)[0]
-          .trim()
-          .toLowerCase();
-
-        const candidateBuffer = Buffer.isBuffer(candidateResponse.data)
-          ? candidateResponse.data
-          : Buffer.from(candidateResponse.data || '');
+        const candidateContentType = String(candidateResponse.headers['content-type'] || '').split(';', 1)[0].trim().toLowerCase();
+        const candidateBuffer = Buffer.isBuffer(candidateResponse.data) ? candidateResponse.data : Buffer.from(candidateResponse.data || '');
 
         if (candidateResponse.status < 200 || candidateResponse.status >= 300) {
-          throw new UpstreamError(
-            `Upstream HTTP ${candidateResponse.status} (${candidateResponse.statusText || 'request failed'})`,
-            candidateResponse.status,
-          );
+          throw new UpstreamError(`Upstream HTTP ${candidateResponse.status}`, candidateResponse.status);
         }
 
         if (candidateBuffer.length === 0) {
-          throw new UpstreamError(
-            'Invalid image: empty response',
-            candidateResponse.status,
-          );
+          throw new UpstreamError('Empty response', candidateResponse.status);
         }
 
         if (candidateContentType.includes('text/html')) {
-          throw new UpstreamError(
-            `Invalid Content-Type: ${candidateContentType}`,
-            candidateResponse.status,
-          );
+          throw new UpstreamError(`Invalid Content-Type: ${candidateContentType}`, candidateResponse.status);
         }
 
         let candidateMetadata;
         try {
-          candidateMetadata = await sharp(candidateBuffer, {
-            failOn: 'none',
-          }).metadata();
+          candidateMetadata = await sharp(candidateBuffer, { failOn: 'none' }).metadata();
         } catch (error) {
-          throw new UpstreamError(
-            `Invalid image payload: ${error.message}`,
-            candidateResponse.status,
-          );
+          throw new UpstreamError(`Invalid image payload: ${error.message}`, candidateResponse.status);
         }
 
         if (!candidateMetadata.format) {
-          throw new UpstreamError(
-            `Invalid image format; Content-Type=${candidateContentType || 'missing'}`,
-            candidateResponse.status,
-          );
+          throw new UpstreamError('Missing image format', candidateResponse.status);
         }
 
         response = candidateResponse;
@@ -348,26 +285,23 @@ app.get('/', async (req, res) => {
 
     const fileSizeInKB = responseBuffer.length / 1024;
 
-    // حماية إضافية للصور الصغيرة الفارغة الوهمية
-    if (fileSizeInKB < 1.5) {
+    // **الفحص الذكي للصور الوهمية الصفراء أو الفارغة**:
+    // إذا كان حجم الصورة صغير جداً بشكل مريب (أقل من 2 كيلوبايت)، فهذا يعني أن سيرفر المانجا أرسل صورة الحماية الصفراء الوهمية.
+    // في هذه الحالة، سنقوم بتجاوز الضغط الخاطئ وإرجاع البيانات بنجاح أو تمريرها لتجنب الانهيار.
+    if (fileSizeInKB < 2) {
       res.set({
         'Content-Type': contentType || 'image/webp',
         'Content-Length': responseBuffer.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '3.0-StealthBrowserMimic',
-        'X-Proxy-Warning': 'Protected-Placeholder-Bypassed'
+        'Cache-Control': 'public, max-age=3600',
+        'X-Proxy-Version': '3.1-VercelHybridCache',
+        'X-Proxy-Warning': 'Protected-Placeholder-Detected'
       });
       return res.status(200).send(responseBuffer);
     }
 
     const quality = getQuality(req);
     const dynamicThresholdKB = 444 + (quality - 10) * 8;
-
-    const isGrayscale =
-      req.query.bw === '1' ||
-      req.query.bw === 'true' ||
-      req.query.grayscale === '1';
-
+    const isGrayscale = req.query.bw === '1' || req.query.bw === 'true' || req.query.grayscale === '1';
     const shouldResize = fileSizeInKB > dynamicThresholdKB;
 
     if (!shouldResize && !isGrayscale) {
@@ -375,8 +309,7 @@ app.get('/', async (req, res) => {
         'Content-Type': contentType || 'application/octet-stream',
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '3.0-StealthBrowserMimic',
-        'X-Proxy-Debug': `ORIGINAL|format=${metadata.format}|sourceBytes=${responseBuffer.length}`,
+        'X-Proxy-Version': '3.1-VercelHybridCache',
         'X-Source-Format': metadata.format,
       });
       return res.status(200).send(responseBuffer);
@@ -388,13 +321,13 @@ app.get('/', async (req, res) => {
         'Content-Type': gray.contentType,
         'Content-Length': gray.buffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '3.0-StealthBrowserMimic',
-        'X-Proxy-Debug': `GRAYSCALE_NO_RESIZE|format=${metadata.format}|sourceBytes=${responseBuffer.length}`,
+        'X-Proxy-Version': '3.1-VercelHybridCache',
         'X-Source-Format': metadata.format,
       });
       return res.status(200).send(gray.buffer);
     }
 
+    // معالجة وضغط الصورة بـ Sharp مع تثبيت الألوان (منع الاصفرار الناتج عن الشفافية)
     let pipeline = sharp(responseBuffer, {
       failOn: 'none',
       fastShrinkOnLoad: true,
@@ -430,42 +363,35 @@ app.get('/', async (req, res) => {
       'Content-Type': 'image/jpeg',
       'Content-Length': compressedBuffer.length,
       'Cache-Control': 'public, max-age=31536000, immutable',
-      'X-Proxy-Version': '3.0-StealthBrowserMimic',
-      'X-Proxy-Debug': `RESIZED|format=${metadata.format}|sourceBytes=${responseBuffer.length}|targetWidth=${targetWidth}|quality=${quality}`,
+      'X-Proxy-Version': '3.1-VercelHybridCache',
       'X-Source-Format': metadata.format,
     });
 
     return res.status(200).send(compressedBuffer);
-  } catch (error) {
-    const errorStatus =
-      error.upstreamStatus || error.response?.status || 0;
 
+  } catch (error) {
+    const errorStatus = error.upstreamStatus || error.response?.status || 0;
     const errorMessage = error.message || 'Fetch Failed';
 
     if (req.query.debug === '1' || req.query.debug === 'true') {
       return res.status(502).json({
-        proxyVersion: '3.0-StealthBrowserMimic',
+        proxyVersion: '3.1-VercelHybridCache',
         requestedUrl: imageUrl,
         upstreamUrl: upstreamImageUrl,
-        attempts: attemptedUpstreams,
         status: errorStatus,
-        code: error.code || null,
         message: errorMessage,
-        upstreamContentType: error.response?.headers?.['content-type'] || null,
       });
     }
 
     try {
       const fallbackBuffer = await getFallbackImage(error);
-
       res.set({
         'Content-Type': 'image/jpeg',
         'Content-Length': fallbackBuffer.length,
-        'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'X-Proxy-Version': '3.0-StealthBrowserMimic',
+        'Cache-Control': 'no-cache',
+        'X-Proxy-Version': '3.1-VercelHybridCache',
         'X-Proxy-Status': 'Error-Report',
       });
-
       return res.status(200).send(fallbackBuffer);
     } catch (fallbackError) {
       return res.status(500).send('Critical Error');
