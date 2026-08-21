@@ -389,7 +389,7 @@ app.get('/', async (req, res) => {
 
     const fileSizeInKB = responseBuffer.length / 1024;
     const quality = getQuality(req);
-    const dynamicThresholdKB = 444 + (quality - 10) * 8;
+    const dynamicThresholdKB = 400 + (quality - 10) * 8;
 
     const isGrayscale =
       req.query.bw === '1' ||
@@ -430,7 +430,7 @@ app.get('/', async (req, res) => {
       fastShrinkOnLoad: true,
     }).rotate();
 
-    const targetWidth = Math.round(460 + (quality / 100) * 1099);
+    const targetWidth = Math.round(400 + (quality / 100) * 1000);
     pipeline = pipeline.resize({
       width: targetWidth,
       fit: 'inside',
