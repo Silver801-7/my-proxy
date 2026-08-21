@@ -212,7 +212,7 @@ function getQuality(req) {
 
     // 95 قيمة تحكم خاصة: الضغط الفعلي يكون بجودة 20.
     if (quality === 95) {
-      quality = 20;
+      quality = 45;
     }
 
     quality = Math.max(1, Math.min(100, quality));
