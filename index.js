@@ -404,7 +404,7 @@ app.get('/', async (req, res) => {
 
     const fileSizeInKB = responseBuffer.length / 1024;
     const quality = getQuality(req);
-    const dynamicThresholdKB = 100 + (quality - 10) * 7;
+    const dynamicThresholdKB = 100 + (quality - 10) * 5;
 
     const isGrayscale =
       req.query.bw === '1' ||
