@@ -207,7 +207,7 @@ function getQuality(req) {
 
     // الحفاظ على السلوك الموجود في الكود الأصلي.
     if (quality === 40) {
-      quality = 30;
+      quality = 15;
     }
 
     // 95 قيمة تحكم خاصة: الضغط الفعلي يكون بجودة 20.
@@ -481,7 +481,7 @@ app.get('/', async (req, res) => {
       fastShrinkOnLoad: true,
     }).rotate();
 
-    const targetWidth = Math.round(400 + (quality / 100) * 1000);
+    const targetWidth = Math.round(390 + (quality / 100) * 900);
     pipeline = pipeline.resize({
       width: targetWidth,
       fit: 'inside',
