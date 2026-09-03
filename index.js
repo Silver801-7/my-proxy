@@ -42,6 +42,36 @@ function getErrorText(error) {
   return String(error?.message || error || 'Unknown Error');
 }
 
+/* لا نعتمد على امتداد الرابط؛ يتم اكتشاف صيغة الصورة من محتواها بواسطة Sharp. */
+function getImageContentType(format, upstreamContentType = '') {
+  const detectedType = String(upstreamContentType || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase();
+
+  if (detectedType.startsWith('image/')) {
+    return detectedType;
+  }
+
+  const contentTypes = {
+    jpeg: 'image/jpeg',
+    jpg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    avif: 'image/avif',
+    heif: 'image/heif',
+    heic: 'image/heic',
+    tiff: 'image/tiff',
+    tif: 'image/tiff',
+    jp2: 'image/jp2',
+    jxl: 'image/jxl',
+    svg: 'image/svg+xml',
+  };
+
+  return contentTypes[String(format || '').toLowerCase()] || 'application/octet-stream';
+}
+
 /*
  * ألوان صورة الخطأ:
  * الأحمر = المصدر أعاد 404 أو Not Found
@@ -162,6 +192,7 @@ async function makeGrayscaleWithoutResize(buffer, format) {
         contentType: 'image/webp',
       };
     case 'tiff':
+    case 'tif':
       return {
         buffer: await pipeline.tiff({ compression: 'lzw' }).toBuffer(),
         contentType: 'image/tiff',
@@ -452,7 +483,7 @@ app.get('/', async (req, res) => {
     /* صورة ملونة تحت الحد: إرجاع المصدر كما وصل، بلا resize أو JPEG. */
     if (!shouldResize && !isGrayscale) {
       res.set({
-        'Content-Type': contentType || 'application/octet-stream',
+        'Content-Type': getImageContentType(metadata.format, contentType),
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
         'X-Proxy-Version': '2.9-MultiFallback',
