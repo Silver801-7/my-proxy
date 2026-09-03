@@ -42,6 +42,36 @@ function getErrorText(error) {
   return String(error?.message || error || 'Unknown Error');
 }
 
+/* لا نعتمد على امتداد الرابط؛ يتم اكتشاف صيغة الصورة من محتواها بواسطة Sharp. */
+function getImageContentType(format, upstreamContentType = '') {
+  const detectedType = String(upstreamContentType || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase();
+
+  if (detectedType.startsWith('image/')) {
+    return detectedType;
+  }
+
+  const contentTypes = {
+    jpeg: 'image/jpeg',
+    jpg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    avif: 'image/avif',
+    heif: 'image/heif',
+    heic: 'image/heic',
+    tiff: 'image/tiff',
+    tif: 'image/tiff',
+    jp2: 'image/jp2',
+    jxl: 'image/jxl',
+    svg: 'image/svg+xml',
+  };
+
+  return contentTypes[String(format || '').toLowerCase()] || 'application/octet-stream';
+}
+
 /*
  * ألوان صورة الخطأ:
  * الأحمر = المصدر أعاد 404 أو Not Found
@@ -162,6 +192,7 @@ async function makeGrayscaleWithoutResize(buffer, format) {
         contentType: 'image/webp',
       };
     case 'tiff':
+    case 'tif':
       return {
         buffer: await pipeline.tiff({ compression: 'lzw' }).toBuffer(),
         contentType: 'image/tiff',
@@ -274,29 +305,31 @@ app.get('/', async (req, res) => {
   try {
     const domainOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
 
-    /*
-     * نرسل أقل عدد ممكن من الرؤوس حتى يكون الطلب قريباً من الطلب المباشر.
-     * لا نرسل Origin أو Sec-Fetch-* يدوياً؛ هذه رؤوس متصفح وقد تغيّر رد المصدر.
-     */
+    /* نرسل رؤوساً شبيهة بطلب صورة من متصفح لتوافق خوادم الصور المحمية. */
     const requestHeaders = {
       'User-Agent':
-        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
+      'Accept-Encoding': 'gzip, deflate, br',
+      'Sec-Fetch-Dest': 'image',
+      'Sec-Fetch-Mode': 'no-cors',
+      'Sec-Fetch-Site': 'cross-site',
     };
 
-    /* استخدم Referer تلقائياً من رابط الصورة نفسه إذا لم يُرسل صراحة */
-    let upstreamReferer =
-      typeof req.query.referer === 'string'
+    /*
+     * بعض خوادم الصور ترفض طلبات الـ proxy إذا لم يصلها Referer وOrigin
+     * متوافقان مع المضيف الأصلي. يمكن تخصيص Referer من query أو البيئة،
+     * وإلا نستخدم أصل المصدر نفسه كقيمة آمنة افتراضية.
+     */
+    const upstreamReferer =
+      typeof req.query.referer === 'string' && req.query.referer
         ? req.query.referer
-        : process.env.UPSTREAM_REFERER;
-
-    if (!upstreamReferer) {
-      upstreamReferer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
-    }
+        : process.env.UPSTREAM_REFERER || `${domainOrigin}/`;
 
     requestHeaders.Referer = upstreamReferer;
+    requestHeaders.Origin = domainOrigin;
 
     /* لا تمرر Cookie إلا عند تفعيله صراحةً. */
     if (process.env.FORWARD_UPSTREAM_COOKIE === 'true' && req.headers.cookie) {
@@ -454,7 +487,7 @@ app.get('/', async (req, res) => {
     /* صورة ملونة تحت الحد: إرجاع المصدر كما وصل، بلا resize أو JPEG. */
     if (!shouldResize && !isGrayscale) {
       res.set({
-        'Content-Type': contentType || 'application/octet-stream',
+        'Content-Type': getImageContentType(metadata.format, contentType),
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
         'X-Proxy-Version': '2.9-MultiFallback',
@@ -525,7 +558,7 @@ app.get('/', async (req, res) => {
     /*
      * وضع التشخيص للجوال:
      * افتح نفس رابط البروكسي مع إضافة &debug=1.
-     * بدلاً من صورة fallback سيظهر JSON يمكن نسخ من المتصفح.
+     * بدلاً من صورة fallback سيظهر JSON يمكن نسخه من المتصفح.
      */
     if (req.query.debug === '1' || req.query.debug === 'true') {
       return res.status(502).json({
@@ -573,18 +606,3 @@ app.get('/', async (req, res) => {
 });
 
 module.exports = app;
-
-/*
- * ملاحظات:
- * 1. إذا كنت تبني رابط البروكسي في جهة أخرى، استخدم:
- *
- *    const proxy = new URL(PROXY_URL);
- *    proxy.searchParams.set('url', imageUrl);
- *    const finalProxyUrl = proxy.toString();
- *
- *    ولا تضع imageUrl مباشرة بعد ?url= إذا كان يحتوي على & أو token.
- *
- * 2. لا تترك rejectUnauthorized:false في الإنتاج إلا لسبب واضح.
- *
- * 3. أضف allowlist للدومينات قبل نشر endpoint يقبل url من المستخدم.
- */
