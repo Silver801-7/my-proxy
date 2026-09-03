@@ -42,6 +42,36 @@ function getErrorText(error) {
   return String(error?.message || error || 'Unknown Error');
 }
 
+/* لا نعتمد على امتداد الرابط؛ يتم اكتشاف صيغة الصورة من محتواها بواسطة Sharp. */
+function getImageContentType(format, upstreamContentType = '') {
+  const detectedType = String(upstreamContentType || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase();
+
+  if (detectedType.startsWith('image/')) {
+    return detectedType;
+  }
+
+  const contentTypes = {
+    jpeg: 'image/jpeg',
+    jpg: 'image/jpeg',
+    png: 'image/png',
+    webp: 'image/webp',
+    gif: 'image/gif',
+    avif: 'image/avif',
+    heif: 'image/heif',
+    heic: 'image/heic',
+    tiff: 'image/tiff',
+    tif: 'image/tiff',
+    jp2: 'image/jp2',
+    jxl: 'image/jxl',
+    svg: 'image/svg+xml',
+  };
+
+  return contentTypes[String(format || '').toLowerCase()] || 'application/octet-stream';
+}
+
 /*
  * ألوان صورة الخطأ:
  * الأحمر = المصدر أعاد 404 أو Not Found
@@ -162,6 +192,7 @@ async function makeGrayscaleWithoutResize(buffer, format) {
         contentType: 'image/webp',
       };
     case 'tiff':
+    case 'tif':
       return {
         buffer: await pipeline.tiff({ compression: 'lzw' }).toBuffer(),
         contentType: 'image/tiff',
@@ -225,7 +256,7 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v2.8-SmartProxy-Debuggable');
+    return res.status(200).send('v3.1-Redirect-On-403');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -274,33 +305,28 @@ app.get('/', async (req, res) => {
   try {
     const domainOrigin = `${parsedUrl.protocol}//${parsedUrl.host}`;
 
-    /*
-     * نرسل أقل عدد ممكن من الرؤوس حتى يكون الطلب قريباً من الطلب المباشر.
-     * لا نرسل Origin أو Sec-Fetch-* يدوياً؛ هذه رؤوس متصفح وقد تغيّر رد المصدر.
-     */
+    /* نرسل رؤوساً شبيهة بطلب صورة من متصفح لتوافق خوادم الصور المحمية. */
     const requestHeaders = {
       'User-Agent':
-        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
     };
 
-    /* استخدم Referer تلقائياً من رابط الصورة نفسه إذا لم يُرسل صراحة */
-    let upstreamReferer =
+    /*
+     * لا نضيف Origin أو Sec-Fetch-* يدوياً؛ فالقيم المصطنعة قد تجعل
+     * خادم الصورة يرفض الطلب باعتباره cross-site. يُرسل Referer فقط
+     * عند تحديده صراحةً، كما في السلوك الأصلي للكود.
+     */
+    const upstreamReferer =
       typeof req.query.referer === 'string'
         ? req.query.referer
         : process.env.UPSTREAM_REFERER;
 
-    if (!upstreamReferer) {
-      if (parsedUrl.hostname.includes('manga-lionz.org')) {
-        upstreamReferer = 'https://manga-lionz.org/';
-      } else {
-        upstreamReferer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
-      }
+    if (upstreamReferer) {
+      requestHeaders.Referer = upstreamReferer;
     }
-
-    requestHeaders.Referer = upstreamReferer;
 
     /* لا تمرر Cookie إلا عند تفعيله صراحةً. */
     if (process.env.FORWARD_UPSTREAM_COOKIE === 'true' && req.headers.cookie) {
@@ -458,7 +484,7 @@ app.get('/', async (req, res) => {
     /* صورة ملونة تحت الحد: إرجاع المصدر كما وصل، بلا resize أو JPEG. */
     if (!shouldResize && !isGrayscale) {
       res.set({
-        'Content-Type': contentType || 'application/octet-stream',
+        'Content-Type': getImageContentType(metadata.format, contentType),
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
         'X-Proxy-Version': '2.9-MultiFallback',
@@ -529,11 +555,11 @@ app.get('/', async (req, res) => {
     /*
      * وضع التشخيص للجوال:
      * افتح نفس رابط البروكسي مع إضافة &debug=1.
-     * بدلاً من صورة fallback سيظهر JSON يمكن نسخ من المتصفح.
+     * بدلاً من صورة fallback سيظهر JSON يمكن نسخه من المتصفح.
      */
     if (req.query.debug === '1' || req.query.debug === 'true') {
       return res.status(502).json({
-        proxyVersion: '2.8-Debuggable',
+        proxyVersion: '3.1-Redirect-On-403',
         requestedUrl: imageUrl,
         upstreamUrl: upstreamImageUrl,
         attempts: attemptedUpstreams,
@@ -542,6 +568,21 @@ app.get('/', async (req, res) => {
         message: errorMessage,
         upstreamContentType: error.response?.headers?.['content-type'] || null,
       });
+    }
+
+    /*
+     * إذا رفض المصدر طلب الـ server بـ 403 بينما يفتح الرابط مباشرةً في
+     * المتصفح، نعيد توجيه العميل إلى الرابط الأصلي بدلاً من إرسال صورة
+     * fallback. وبذلك يستطيع المتصفح جلب الصورة مباشرةً من المصدر.
+     */
+    if (errorStatus === 403 && parsedUrl) {
+      res.set({
+        Location: imageUrl,
+        'Cache-Control': 'no-store',
+        'X-Proxy-Version': '3.1-Redirect-On-403',
+        'X-Proxy-Status': 'Upstream-403-Redirect',
+      });
+      return res.status(302).end();
     }
 
     console.error('IMAGE PROXY ERROR:', {
@@ -561,7 +602,7 @@ app.get('/', async (req, res) => {
         'Content-Type': 'image/jpeg',
         'Content-Length': fallbackBuffer.length,
         'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'X-Proxy-Version': '2.8-Debuggable',
+        'X-Proxy-Version': '3.1-Redirect-On-403',
         'X-Proxy-Status': 'Error-Report',
         'X-Proxy-Debug': `ERROR|attempts=${attemptedUpstreams.length}|status=${errorStatus}|message=${encodeURIComponent(errorMessage.slice(0, 140))}`,
         'X-Proxy-Error': encodeURIComponent(errorMessage.slice(0, 180)),
