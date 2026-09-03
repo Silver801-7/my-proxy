@@ -97,55 +97,6 @@ function buildCandidateImageUrls(imageUrl) {
     }
   };
 
-  // 1. الرابط الأصلي كما هو
-  add(imageUrl);
-
-  try {
-    const urlObj = new URL(imageUrl);
-    const host = urlObj.hostname.toLowerCase();
-
-    // --- منطق MeshManga (لا تحذفه) ---
-    if ((host === 'appswat.com' || host === 'meshmanga.com') && urlObj.pathname.startsWith('/v2/media/')) {
-      urlObj.hostname = 'meshmanga.com';
-      urlObj.pathname = urlObj.pathname.replace(/%(?!25)([0-9a-f]{2})/gi, '%25$1');
-      const repaired = urlObj.toString().replace(/%25e2%80%99/gi, '%25e2%2580%2599').replace(/%e2%80%99/gi, '%25e2%2580%2599');
-      add(repaired);
-      const profiles = [{ w: '3840', q: '100' }, { w: '1920', q: '100' }, { w: '1920', q: '75' }];
-      for (const p of profiles) {
-        const next = new URL('https://meshmanga.com/_next/image');
-        next.searchParams.set('url', repaired);
-        next.searchParams.set('w', p.w);
-        next.searchParams.set('q', p.q);
-        add(next.toString());
-      }
-    }
-
-    // --- نظام المحاولات الذكي لكل المواقع (حل مشكلة .JPEG) ---
-    const pathname = urlObj.pathname;
-    const lastDot = pathname.lastIndexOf('.');
-    if (lastDot !== -1) {
-      const currentExt = pathname.substring(lastDot + 1);
-      const urlWithoutQuery = imageUrl.split('?')[0];
-      const baseUrl = urlWithoutQuery.substring(0, urlWithoutQuery.lastIndexOf('.'));
-      const query = urlObj.search; // الحفاظ على v=123 وغيرها
-
-      // أ. تجربة الحروف الصغيرة (مثلاً .JPEG -> .jpeg)
-      if (/[A-Z]/.test(currentExt)) {
-        add(baseUrl + '.' + currentExt.toLowerCase() + query);
-      }
-
-      // ب. تجربة التحويل التلقائي بين الصيغ المشهورة
-      const alternatives = ['jpg', 'jpeg', 'webp', 'png'];
-      for (const alt of alternatives) {
-        add(baseUrl + '.' + alt + query);
-      }
-    }
-  } catch (_) {}
-
-  return candidates;
-}
-
-
   // أي موقع غير MeshManga يبقى على مساره الأصلي بدون تغيير.
   add(imageUrl);
 
