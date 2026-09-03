@@ -256,7 +256,7 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v2.8-SmartProxy-Debuggable');
+    return res.status(200).send('v3.0-Image-Headers-Fix');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -312,24 +312,21 @@ app.get('/', async (req, res) => {
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-      'Accept-Encoding': 'gzip, deflate, br',
-      'Sec-Fetch-Dest': 'image',
-      'Sec-Fetch-Mode': 'no-cors',
-      'Sec-Fetch-Site': 'cross-site',
     };
 
     /*
-     * بعض خوادم الصور ترفض طلبات الـ proxy إذا لم يصلها Referer وOrigin
-     * متوافقان مع المضيف الأصلي. يمكن تخصيص Referer من query أو البيئة،
-     * وإلا نستخدم أصل المصدر نفسه كقيمة آمنة افتراضية.
+     * لا نضيف Origin أو Sec-Fetch-* يدوياً؛ فالقيم المصطنعة قد تجعل
+     * خادم الصورة يرفض الطلب باعتباره cross-site. يُرسل Referer فقط
+     * عند تحديده صراحةً، كما في السلوك الأصلي للكود.
      */
     const upstreamReferer =
-      typeof req.query.referer === 'string' && req.query.referer
+      typeof req.query.referer === 'string'
         ? req.query.referer
-        : process.env.UPSTREAM_REFERER || `${domainOrigin}/`;
+        : process.env.UPSTREAM_REFERER;
 
-    requestHeaders.Referer = upstreamReferer;
-    requestHeaders.Origin = domainOrigin;
+    if (upstreamReferer) {
+      requestHeaders.Referer = upstreamReferer;
+    }
 
     /* لا تمرر Cookie إلا عند تفعيله صراحةً. */
     if (process.env.FORWARD_UPSTREAM_COOKIE === 'true' && req.headers.cookie) {
@@ -562,7 +559,7 @@ app.get('/', async (req, res) => {
      */
     if (req.query.debug === '1' || req.query.debug === 'true') {
       return res.status(502).json({
-        proxyVersion: '2.8-Debuggable',
+        proxyVersion: '3.0-Image-Headers-Fix',
         requestedUrl: imageUrl,
         upstreamUrl: upstreamImageUrl,
         attempts: attemptedUpstreams,
@@ -590,7 +587,7 @@ app.get('/', async (req, res) => {
         'Content-Type': 'image/jpeg',
         'Content-Length': fallbackBuffer.length,
         'Cache-Control': 'no-cache, no-store, must-revalidate',
-        'X-Proxy-Version': '2.8-Debuggable',
+        'X-Proxy-Version': '3.0-Image-Headers-Fix',
         'X-Proxy-Status': 'Error-Report',
         'X-Proxy-Debug': `ERROR|attempts=${attemptedUpstreams.length}|status=${errorStatus}|message=${encodeURIComponent(errorMessage.slice(0, 140))}`,
         'X-Proxy-Error': encodeURIComponent(errorMessage.slice(0, 180)),
@@ -606,4 +603,3 @@ app.get('/', async (req, res) => {
 });
 
 module.exports = app;
-
