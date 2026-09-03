@@ -1,4 +1,4 @@
-const express = require('express');
+Const express = require('express');
 const axios = require('axios');
 const sharp = require('sharp');
 const http = require('http');
@@ -40,36 +40,6 @@ class UpstreamError extends Error {
 
 function getErrorText(error) {
   return String(error?.message || error || 'Unknown Error');
-}
-
-/* لا نعتمد على امتداد الرابط؛ يتم اكتشاف صيغة الصورة من محتواها بواسطة Sharp. */
-function getImageContentType(format, upstreamContentType = '') {
-  const detectedType = String(upstreamContentType || '')
-    .split(';', 1)[0]
-    .trim()
-    .toLowerCase();
-
-  if (detectedType.startsWith('image/')) {
-    return detectedType;
-  }
-
-  const contentTypes = {
-    jpeg: 'image/jpeg',
-    jpg: 'image/jpeg',
-    png: 'image/png',
-    webp: 'image/webp',
-    gif: 'image/gif',
-    avif: 'image/avif',
-    heif: 'image/heif',
-    heic: 'image/heic',
-    tiff: 'image/tiff',
-    tif: 'image/tiff',
-    jp2: 'image/jp2',
-    jxl: 'image/jxl',
-    svg: 'image/svg+xml',
-  };
-
-  return contentTypes[String(format || '').toLowerCase()] || 'application/octet-stream';
 }
 
 /*
@@ -192,7 +162,6 @@ async function makeGrayscaleWithoutResize(buffer, format) {
         contentType: 'image/webp',
       };
     case 'tiff':
-    case 'tif':
       return {
         buffer: await pipeline.tiff({ compression: 'lzw' }).toBuffer(),
         contentType: 'image/tiff',
@@ -311,21 +280,23 @@ app.get('/', async (req, res) => {
      */
     const requestHeaders = {
       'User-Agent':
-        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
     };
 
-    /* استخدم Referer فقط إذا كان مطلوباً من المصدر. */
-    const upstreamReferer =
+    /* استخدم Referer تلقائياً من رابط الصورة نفسه إذا لم يُرسل صراحة */
+    let upstreamReferer =
       typeof req.query.referer === 'string'
         ? req.query.referer
         : process.env.UPSTREAM_REFERER;
 
-    if (upstreamReferer) {
-      requestHeaders.Referer = upstreamReferer;
+    if (!upstreamReferer) {
+      upstreamReferer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
     }
+
+    requestHeaders.Referer = upstreamReferer;
 
     /* لا تمرر Cookie إلا عند تفعيله صراحةً. */
     if (process.env.FORWARD_UPSTREAM_COOKIE === 'true' && req.headers.cookie) {
@@ -483,7 +454,7 @@ app.get('/', async (req, res) => {
     /* صورة ملونة تحت الحد: إرجاع المصدر كما وصل، بلا resize أو JPEG. */
     if (!shouldResize && !isGrayscale) {
       res.set({
-        'Content-Type': getImageContentType(metadata.format, contentType),
+        'Content-Type': contentType || 'application/octet-stream',
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
         'X-Proxy-Version': '2.9-MultiFallback',
@@ -554,7 +525,7 @@ app.get('/', async (req, res) => {
     /*
      * وضع التشخيص للجوال:
      * افتح نفس رابط البروكسي مع إضافة &debug=1.
-     * بدلاً من صورة fallback سيظهر JSON يمكن نسخه من المتصفح.
+     * بدلاً من صورة fallback سيظهر JSON يمكن نسخ من المتصفح.
      */
     if (req.query.debug === '1' || req.query.debug === 'true') {
       return res.status(502).json({
