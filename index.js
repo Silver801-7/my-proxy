@@ -6,12 +6,34 @@ const https = require('https');
 
 const app = express();
 
+// ============================================================================
+// ⚙️ إعدادات الدقة المخصصة (عدل الأرقام التي على اليمين كما تريد)
+// الرقم الذي على اليسار هو الموجود في التطبيق، واليمين هو الدقة الفعلية التي سينفذها السيرفر
+// ============================================================================
+const QUALITY_MAP = {
+  10: 10,  // إذا اخترت 10% في التطبيق -> السيرفر يجعلها 10%
+  20: 15,  // إذا اخترت 20% في التطبيق -> السيرفر يجعلها 15% (كما طلبت)
+  40: 35,  // إذا اخترت 40% في التطبيق -> السيرفر يجعلها 35%
+  50: 45,  // إذا اخترت 50% في التطبيق -> السيرفر يجعلها 45%
+  70: 60,  // إذا اخترت 70% في التطبيق -> السيرفر يجعلها 60%
+  80: 70,  // إذا اخترت 80% في التطبيق -> السيرفر يجعلها 70%
+  90: 80,  // إذا اخترت 90% في التطبيق -> السيرفر يجعلها 80%
+  95: 45,  // إذا اخترت 95% في التطبيق -> السيرفر يجعلها 45% (مع إجبار الضغط)
+};
+
+// الدقة الافتراضية في حال لم يرسل التطبيق أي رقم
+const DEFAULT_QUALITY = 35;
+
+// خيار إجبار الضغط: ضع الرقم من التطبيق الذي تريد عند اختياره أن يضغط كل الصور إجبارياً
+const FORCE_COMPRESSION_TRIGGER = 95;
+// ============================================================================
+
+
 const httpAgent = new http.Agent({
   keepAlive: true,
   maxSockets: 50,
 });
 
-// 1. تعديل بصمة TLS لتقليد متصفح Chrome على Vercel
 const httpsAgent = new https.Agent({
   keepAlive: true,
   maxSockets: 50,
@@ -30,7 +52,7 @@ const httpsAgent = new https.Agent({
 });
 
 const axiosInstance = axios.create({
-  timeout: 12000, // تقليل المهلة قليلاً لتناسب حدود Vercel Serverless
+  timeout: 12000,
   responseType: 'arraybuffer',
   httpAgent,
   httpsAgent,
@@ -95,6 +117,9 @@ function sendTextError(res, error, extraDebug = '') {
   return res.status(info.httpStatus).send(`${info.code}: ${rawMessage}`);
 }
 
+/*
+ * دالة توليد الروابط البديلة لتخطي حماية Cloudflare تلقائياً بدون تدخل منك
+ */
 function buildCandidateImageUrls(imageUrl) {
   const candidates = [];
   const add = (value) => {
@@ -102,8 +127,6 @@ function buildCandidateImageUrls(imageUrl) {
       candidates.push(value);
     }
   };
-
-  add(imageUrl);
 
   let cleanTargetUrl = imageUrl;
 
@@ -116,51 +139,41 @@ function buildCandidateImageUrls(imageUrl) {
       sourceUrl.pathname.startsWith('/v2/media/')
     ) {
       sourceUrl.hostname = 'meshmanga.com';
+      cleanTargetUrl = sourceUrl.toString();
 
-      sourceUrl.pathname = sourceUrl.pathname.replace(
-        /%(?!25)([0-9a-f]{2})/gi,
-        '%25$1',
-      );
-
-      const repairedDirectUrl = sourceUrl
-        .toString()
+      // تصليح علامات الاقتباس الخاصة بموقع meshmanga
+      const repairedDirectUrl = cleanTargetUrl
         .replace(/%25e2%80%99/gi, '%25e2%2580%2599')
         .replace(/%e2%80%99/gi, '%25e2%2580%2599');
 
-      cleanTargetUrl = repairedDirectUrl;
+      // 1. استخدام وسطاء عالميين لتمرير رابط _next/image أو الرابط المباشر لتخطي حظر IP Vercel
+      const nextImg = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1920&q=85`;
+      
+      add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}&default=1`);
+      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg)}&default=1`);
+      add(`https://i0.wp.com/${sourceUrl.host}${sourceUrl.pathname}`);
+      add(`https://cdn.statically.io/img/${sourceUrl.host}${sourceUrl.pathname}`);
+      add(nextImg);
       add(repairedDirectUrl);
-
-      const mediatorProfiles = [
-        { width: '3840', quality: '100' },
-        { width: '1920', quality: '100' },
-        { width: '1920', quality: '75' },
-      ];
-
-      for (const profile of mediatorProfiles) {
-        const nextImageUrl = new URL('https://meshmanga.com/_next/image');
-        nextImageUrl.searchParams.set('url', repairedDirectUrl);
-        nextImageUrl.searchParams.set('w', profile.width);
-        nextImageUrl.searchParams.set('q', profile.quality);
-        add(nextImageUrl.toString());
-      }
+      return candidates;
     }
   } catch (_) {}
 
-  // 2. إذا وضعت رابط Cloudflare Worker في إعدادات Environment Variables في Vercel
-  if (process.env.CF_WORKER_URL) {
-    const baseWorker = process.env.CF_WORKER_URL.replace(/\/$/, '');
-    add(`${baseWorker}/?url=${encodeURIComponent(cleanTargetUrl)}`);
-  }
-
-  // 3. وسطاء صور مجانيين (لتجاوز حظر IP Vercel تلقائياً بدون إعدادات خارجية)
+  // لأي موقع آخر غير meshmanga:
+  // المحاولة الأولى عبر وسيط wsrv لتخطي Cloudflare
   add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}&default=1`);
-  
+
+  // المحاولة الثانية عبر وسيط Jetpack (WordPress CDN)
   try {
-    const parsedForJetpack = new URL(cleanTargetUrl);
-    if (parsedForJetpack.protocol === 'https:') {
-      add(`https://i0.wp.com/${parsedForJetpack.host}${parsedForJetpack.pathname}${parsedForJetpack.search}`);
+    const parsed = new URL(cleanTargetUrl);
+    if (parsed.protocol === 'https:') {
+      add(`https://i0.wp.com/${parsed.host}${parsed.pathname}${parsed.search}`);
+      add(`https://cdn.statically.io/img/${parsed.host}${parsed.pathname}`);
     }
   } catch (_) {}
+
+  // المحاولة الأخيرة عبر الرابط المباشر
+  add(cleanTargetUrl);
 
   return candidates;
 }
@@ -205,40 +218,35 @@ function getRequestedQuality(req) {
 
 function isForcedCompression(req) {
   const rawQuality = getRequestedQuality(req);
-  return Number.parseInt(rawQuality, 10) === 95;
+  return Number.parseInt(rawQuality, 10) === FORCE_COMPRESSION_TRIGGER;
 }
 
 function getQuality(req) {
   const rawQuality = getRequestedQuality(req);
 
-  let quality = 40;
-
-  if (rawQuality !== undefined && rawQuality !== null && rawQuality !== '') {
-    quality = Number.parseInt(rawQuality, 10);
-
-    if (Number.isNaN(quality)) {
-      quality = 40;
-    }
-
-    if (quality === 40) {
-      quality = 35;
-    }
-
-    if (quality === 95) {
-      quality = 45;
-    }
-
-    quality = Math.max(1, Math.min(100, quality));
+  if (rawQuality === undefined || rawQuality === null || rawQuality === '') {
+    return DEFAULT_QUALITY;
   }
 
-  return quality;
+  const parsed = Number.parseInt(rawQuality, 10);
+
+  if (Number.isNaN(parsed)) {
+    return DEFAULT_QUALITY;
+  }
+
+  // إذا كانت القيمة موجودة في جدول QUALITY_MAP في أعلى الكود، نأخذ القيمة التي حددتها أنت
+  if (Object.prototype.hasOwnProperty.call(QUALITY_MAP, parsed)) {
+    return Math.max(1, Math.min(100, QUALITY_MAP[parsed]));
+  }
+
+  return Math.max(1, Math.min(100, parsed));
 }
 
 app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v2.9-DataSaver-SmartLongStrip');
+    return res.status(200).send('v3.0-CustomQualityMap-CloudflareBypass');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -254,10 +262,6 @@ app.get('/', async (req, res) => {
       throw new Error('Only HTTP and HTTPS URLs are allowed');
     }
   } catch (error) {
-    console.error('Invalid image URL:', {
-      imageUrl,
-      message: error.message,
-    });
     return sendTextError(res, error);
   }
 
@@ -265,20 +269,18 @@ app.get('/', async (req, res) => {
   let attemptedUpstreams = [];
 
   try {
-    // توليد Referer تلقائي من نفس دومين الصورة لتجنب الحظر
     const defaultReferer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
     const upstreamReferer =
       typeof req.query.referer === 'string'
         ? req.query.referer
         : process.env.UPSTREAM_REFERER || defaultReferer;
 
-    const requestHeaders = {
+    const baseHeaders = {
       'User-Agent':
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-      Referer: upstreamReferer,
       'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
       'Sec-Ch-Ua-Mobile': '?0',
       'Sec-Ch-Ua-Platform': '"Windows"',
@@ -287,17 +289,12 @@ app.get('/', async (req, res) => {
       'Sec-Fetch-Site': 'cross-site',
     };
 
-    if (process.env.FORWARD_UPSTREAM_COOKIE === 'true' && req.headers.cookie) {
-      requestHeaders.Cookie = req.headers.cookie;
-    }
-
     const candidateUrls = buildCandidateImageUrls(imageUrl);
     attemptedUpstreams = candidateUrls;
 
     let response = null;
     let responseBuffer = null;
     let contentType = '';
-    let finalUrl = '';
     let metadata = null;
     let lastCandidateError = null;
 
@@ -305,8 +302,15 @@ app.get('/', async (req, res) => {
       upstreamImageUrl = candidateUrl;
 
       try {
+        // إذا كان الرابط يمر عبر وسيط مجاني، لا نرسل Referer الموقع الأصلي حتى لا يرفضه الوسيط
+        const isProxyService = /wsrv\.nl|wp\.com|statically\.io/i.test(candidateUrl);
+        const currentHeaders = { ...baseHeaders };
+        if (!isProxyService) {
+          currentHeaders.Referer = upstreamReferer;
+        }
+
         const candidateResponse = await axiosInstance.get(candidateUrl, {
-          headers: requestHeaders,
+          headers: currentHeaders,
         });
 
         const candidateContentType = String(
@@ -322,16 +326,13 @@ app.get('/', async (req, res) => {
 
         if (candidateResponse.status < 200 || candidateResponse.status >= 300) {
           throw new UpstreamError(
-            `Upstream HTTP ${candidateResponse.status} (${candidateResponse.statusText || 'request failed'})`,
+            `Upstream HTTP ${candidateResponse.status}`,
             candidateResponse.status,
           );
         }
 
         if (candidateBuffer.length === 0) {
-          throw new UpstreamError(
-            'Invalid image: empty response',
-            candidateResponse.status,
-          );
+          throw new UpstreamError('Empty image buffer', candidateResponse.status);
         }
 
         if (candidateContentType.includes('text/html')) {
@@ -341,51 +342,22 @@ app.get('/', async (req, res) => {
           );
         }
 
-        let candidateMetadata;
-        try {
-          candidateMetadata = await sharp(candidateBuffer, {
-            failOn: 'none',
-            limitInputPixels: false,
-          }).metadata();
-        } catch (error) {
-          throw new UpstreamError(
-            `Invalid image payload: ${error.message}`,
-            candidateResponse.status,
-          );
-        }
+        const candidateMetadata = await sharp(candidateBuffer, {
+          failOn: 'none',
+          limitInputPixels: false,
+        }).metadata();
 
         if (!candidateMetadata.format) {
-          throw new UpstreamError(
-            `Invalid image format; Content-Type=${candidateContentType || 'missing'}`,
-            candidateResponse.status,
-          );
+          throw new UpstreamError('Invalid image format', candidateResponse.status);
         }
 
         response = candidateResponse;
         responseBuffer = candidateBuffer;
         contentType = candidateContentType;
         metadata = candidateMetadata;
-        finalUrl = candidateResponse.request?.res?.responseUrl || candidateUrl;
-
-        console.log('UPSTREAM IMAGE RESPONSE:', {
-          requestedUrl: imageUrl,
-          selectedUpstreamUrl: candidateUrl,
-          finalUrl,
-          status: candidateResponse.status,
-          contentType,
-          bytes: responseBuffer.length,
-          attempts: attemptedUpstreams,
-        });
-
         break;
       } catch (candidateError) {
         lastCandidateError = candidateError;
-        console.error('IMAGE CANDIDATE FAILED:', {
-          requestedUrl: imageUrl,
-          candidateUrl,
-          status: candidateError.upstreamStatus || 0,
-          message: candidateError.message || String(candidateError),
-        });
       }
     }
 
@@ -432,9 +404,7 @@ app.get('/', async (req, res) => {
         'Content-Type': 'image/jpeg',
         'Content-Length': forcedBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '2.9-MultiFallback',
-        'X-Proxy-Debug': `FORCED_COMPRESSED|requestedQuality=95|quality=${quality}|sourceBytes=${responseBuffer.length}|outputBytes=${forcedBuffer.length}|format=${metadata.format}`,
-        'X-Source-Format': metadata.format,
+        'X-Proxy-Debug': `FORCED|quality=${quality}|outBytes=${forcedBuffer.length}`,
       });
 
       return res.status(200).send(forcedBuffer);
@@ -445,9 +415,7 @@ app.get('/', async (req, res) => {
         'Content-Type': contentType || 'application/octet-stream',
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '2.9-MultiFallback',
-        'X-Proxy-Debug': `ORIGINAL|format=${metadata.format}|sourceBytes=${responseBuffer.length}`,
-        'X-Source-Format': metadata.format,
+        'X-Proxy-Debug': `ORIGINAL|bytes=${responseBuffer.length}`,
       });
       return res.status(200).send(responseBuffer);
     }
@@ -458,9 +426,6 @@ app.get('/', async (req, res) => {
         'Content-Type': gray.contentType,
         'Content-Length': gray.buffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '2.9-MultiFallback',
-        'X-Proxy-Debug': `GRAYSCALE_NO_RESIZE|format=${metadata.format}|sourceBytes=${responseBuffer.length}`,
-        'X-Source-Format': metadata.format,
       });
       return res.status(200).send(gray.buffer);
     }
@@ -505,9 +470,6 @@ app.get('/', async (req, res) => {
         'Content-Type': contentType || 'application/octet-stream',
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Version': '2.9-MultiFallback',
-        'X-Proxy-Debug': `ORIGINAL_SMALLER|sourceBytes=${responseBuffer.length}|compressedBytes=${compressedBuffer.length}`,
-        'X-Source-Format': metadata.format,
       });
       return res.status(200).send(responseBuffer);
     }
@@ -516,42 +478,14 @@ app.get('/', async (req, res) => {
       'Content-Type': 'image/jpeg',
       'Content-Length': compressedBuffer.length,
       'Cache-Control': 'public, max-age=31536000, immutable',
-      'X-Proxy-Version': '2.9-MultiFallback',
-      'X-Proxy-Debug': `RESIZED|long=${isLongStrip}|format=${metadata.format}|sourceBytes=${responseBuffer.length}|outputBytes=${compressedBuffer.length}|targetWidth=${targetWidth}|quality=${quality}`,
-      'X-Source-Format': metadata.format,
+      'X-Proxy-Debug': `RESIZED|quality=${quality}|outBytes=${compressedBuffer.length}`,
     });
 
     return res.status(200).send(compressedBuffer);
   } catch (error) {
-    const errorStatus =
-      error.upstreamStatus || error.response?.status || 0;
-
+    const errorStatus = error.upstreamStatus || error.response?.status || 0;
     const errorMessage = error.message || 'Fetch Failed';
-
-    if (req.query.debug === '1' || req.query.debug === 'true') {
-      return res.status(502).json({
-        proxyVersion: '2.9-VercelReady',
-        requestedUrl: imageUrl,
-        upstreamUrl: upstreamImageUrl,
-        attempts: attemptedUpstreams,
-        status: errorStatus,
-        code: error.code || null,
-        message: errorMessage,
-        upstreamContentType: error.response?.headers?.['content-type'] || null,
-      });
-    }
-
-    console.error('IMAGE PROXY ERROR:', {
-      imageUrl,
-      upstreamUrl: upstreamImageUrl,
-      attempts: attemptedUpstreams,
-      status: errorStatus,
-      code: error.code || '',
-      message: errorMessage,
-      upstreamContentType: error.response?.headers?.['content-type'] || '',
-    });
-
-    const debugHeader = `ERROR|attempts=${attemptedUpstreams.length}|status=${errorStatus}|message=${encodeURIComponent(errorMessage.slice(0, 140))}`;
+    const debugHeader = `ERROR|attempts=${attemptedUpstreams.length}|status=${errorStatus}|msg=${encodeURIComponent(errorMessage.slice(0, 140))}`;
     return sendTextError(res, error, debugHeader);
   }
 });
