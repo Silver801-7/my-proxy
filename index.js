@@ -25,7 +25,6 @@ const DEFAULT_QUALITY = 30;
 const FORCE_COMPRESSION_TRIGGER = 95;
 // ============================================================================
 
-// نفس إعدادات الاتصال الأصلية لـ v4.0 التي اشتغلت مع سوات مانجا بدون أي تعقيد في TLS
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
 const httpsAgent = new https.Agent({
   keepAlive: true,
@@ -42,10 +41,11 @@ const axiosInstance = axios.create({
 });
 
 class UpstreamError extends Error {
-  constructor(message, status = 0) {
+  constructor(message, status = 0, details = {}) {
     super(message);
     this.name = 'UpstreamError';
     this.upstreamStatus = status;
+    this.details = details;
   }
 }
 
@@ -89,9 +89,6 @@ function sendTextError(res, error, extraDebug = '') {
   return res.status(info.httpStatus).send(`${info.code}: ${rawMessage}`);
 }
 
-/*
- * توليد الروابط البديلة مع فصل كل موقع على حدة
- */
 function buildCandidateImageUrls(imageUrl) {
   const candidates = [];
   const add = (value) => {
@@ -107,7 +104,7 @@ function buildCandidateImageUrls(imageUrl) {
     const host = sourceUrl.hostname.toLowerCase();
 
     // ========================================================================
-    // 1. قسم سوات مانجا (نفس كود v4.0 الذي اشتغل معك بالضبط بدون أي تغيير)
+    // 1. قسم سوات مانجا (ثابت ومضمون 100%)
     // ========================================================================
     if (
       (host === 'appswat.com' || host === 'meshmanga.com') &&
@@ -139,27 +136,24 @@ function buildCandidateImageUrls(imageUrl) {
     }
 
     // ========================================================================
-    // 2. قسم موقع MangaTek (معزول تماماً مع تجربة جميع المنافذ الممكنة له)
+    // 2. قسم موقع MangaTek
     // ========================================================================
     if (host.includes('mangatek.com')) {
       const noQueryUrl = `${sourceUrl.origin}${sourceUrl.pathname}`;
-      // تجربة الدومين الرئيسي بدلاً من img.mangatek.com في حال كان مسار الصور مشتركاً
-      const mainDomainUrl = `https://mangatek.com${sourceUrl.pathname}${sourceUrl.search}`;
 
-      // محولات قوقل المتعددة (gadget + blogger proxy)
+      // محولات قوقل
       add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(imageUrl)}`);
-      add(`https://images2-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(noQueryUrl)}`);
+      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(noQueryUrl)}`);
 
-      // وسطاء CDN المتعددة
+      // وسطاء الصور المختلفة
       add(`https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}`);
       add(`https://wsrv.nl/?url=${encodeURIComponent(noQueryUrl)}`);
-      add(`https://cdn.statically.io/img/${sourceUrl.host}${sourceUrl.pathname}`);
       add(`https://i0.wp.com/${sourceUrl.host}${sourceUrl.pathname}`);
+      add(`https://cdn.statically.io/img/${sourceUrl.host}${sourceUrl.pathname}`);
 
       // الروابط المباشرة
       add(imageUrl);
       add(noQueryUrl);
-      add(mainDomainUrl);
 
       return candidates;
     }
@@ -252,40 +246,74 @@ async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, isMan
     }
   }
 
-  const res = await axiosInstance.get(candidateUrl, { headers: currentHeaders });
+  try {
+    const res = await axiosInstance.get(candidateUrl, { headers: currentHeaders });
 
-  if (res.status < 200 || res.status >= 300) {
-    throw new UpstreamError(`HTTP ${res.status}`, res.status);
+    const contentType = String(res.headers['content-type'] || '')
+      .split(';', 1)[0]
+      .trim()
+      .toLowerCase();
+
+    const buffer = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data || '');
+
+    if (res.status < 200 || res.status >= 300) {
+      const bodyPreview = buffer.toString('utf8', 0, 200).replace(/\s+/g, ' ');
+      throw new UpstreamError(`HTTP ${res.status}`, res.status, {
+        candidateUrl,
+        status: res.status,
+        contentType,
+        server: res.headers['server'] || null,
+        cfRay: res.headers['cf-ray'] || null,
+        bodyPreview,
+      });
+    }
+
+    if (buffer.length < 100 || contentType.includes('text/html')) {
+      const bodyPreview = buffer.toString('utf8', 0, 200).replace(/\s+/g, ' ');
+      throw new UpstreamError('Invalid image payload (HTML or empty)', res.status, {
+        candidateUrl,
+        status: res.status,
+        contentType,
+        bytes: buffer.length,
+        bodyPreview,
+      });
+    }
+
+    const metadata = await sharp(buffer, {
+      failOn: 'none',
+      limitInputPixels: false,
+    }).metadata();
+
+    if (!metadata.format) {
+      throw new UpstreamError('Unsupported image format', res.status, {
+        candidateUrl,
+        status: res.status,
+        contentType,
+      });
+    }
+
+    return { buffer, contentType, metadata, candidateUrl };
+  } catch (err) {
+    if (err instanceof UpstreamError) throw err;
+    throw new UpstreamError(err.message || 'Network Error', 0, {
+      candidateUrl,
+      code: err.code || 'NETWORK_ERR',
+      message: err.message,
+    });
   }
-
-  const contentType = String(res.headers['content-type'] || '')
-    .split(';', 1)[0]
-    .trim()
-    .toLowerCase();
-
-  const buffer = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data || '');
-
-  if (buffer.length < 100 || contentType.includes('text/html')) {
-    throw new UpstreamError('Invalid image payload', res.status);
-  }
-
-  const metadata = await sharp(buffer, {
-    failOn: 'none',
-    limitInputPixels: false,
-  }).metadata();
-
-  if (!metadata.format) {
-    throw new UpstreamError('Unsupported image format', res.status);
-  }
-
-  return { buffer, contentType, metadata, candidateUrl };
 }
 
 app.get('/', async (req, res) => {
-  const imageUrl = req.query.url;
+  // دعم قراءة الرابط حتى لو كان فيه &v=... غير مشفر في نهاية رابط المتصفح
+  let imageUrl = req.query.url;
+  if (typeof imageUrl === 'string' && req.query.v && !imageUrl.includes('?v=')) {
+    imageUrl = `${imageUrl}?v=${req.query.v}`;
+  }
+
+  const isDebugMode = req.query.debug === '1' || req.query.debug === 'true';
 
   if (!imageUrl) {
-    return res.status(200).send('v4.1-RestoredSwat-IsolatedMangaTek');
+    return res.status(200).send('v4.2-DebugJSON-Ready');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -312,7 +340,6 @@ app.get('/', async (req, res) => {
         ? req.query.referer
         : process.env.UPSTREAM_REFERER || defaultReferer;
 
-    // نفس الهيدرز النظيفة لـ v4.0 التي لا تسبب حظر 404 مع سيرفر قوقل
     const baseHeaders = {
       'User-Agent':
         req.headers['user-agent'] ||
@@ -335,6 +362,18 @@ app.get('/', async (req, res) => {
     const responseBuffer = winner.buffer;
     const contentType = winner.contentType;
     const metadata = winner.metadata;
+
+    // إذا نجحت الصورة وكنت مفعل debug=1 وأضفت &info=1 يعرض لك JSON بنجاح الصورة
+    if (isDebugMode && req.query.info === '1') {
+      return res.status(200).json({
+        success: true,
+        winnerUrl: winner.candidateUrl,
+        format: metadata.format,
+        width: metadata.width,
+        height: metadata.height,
+        originalSizeKB: Math.round(responseBuffer.length / 1024),
+      });
+    }
 
     const width = metadata.width || 800;
     const height = metadata.height || 1200;
@@ -451,7 +490,17 @@ app.get('/', async (req, res) => {
     return res.status(200).send(compressedBuffer);
   } catch (aggregateError) {
     const errors = aggregateError.errors || [aggregateError];
-    // إذا كان هناك خطأ 403 بين المحاولات نظهره بدلاً من إظهار 404 الخاص بأحد الوسطاء
+
+    // فحص الـ JSON المفصل في المتصفح عند إضافة ?debug=1
+    if (isDebugMode) {
+      return res.status(502).json({
+        proxyVersion: 'v4.2-DebugJSON',
+        requestedUrl: imageUrl,
+        totalAttempts: candidateUrls.length,
+        failedAttemptsDetails: errors.map((e) => e.details || { message: e.message }),
+      });
+    }
+
     const forbiddenErr = errors.find((e) => e.upstreamStatus === 403);
     const primaryErr = forbiddenErr || errors[0] || new UpstreamError('All candidates failed', 403);
     return sendTextError(res, primaryErr);
