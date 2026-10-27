@@ -7,27 +7,23 @@ const https = require('https');
 const app = express();
 
 // ============================================================================
-// ⚙️ إعدادات الدقة المخصصة (عدل الأرقام التي على اليمين كما تريد)
-// الرقم الذي على اليسار هو الموجود في التطبيق، واليمين هو الدقة الفعلية التي سينفذها السيرفر
+// ⚙️ إعدادات الدقة المخصصة لتوفير الباقة (عدّل الأرقام على اليمين كما تحب)
+// اليسار = الرقم الذي تختاره في التطبيق | اليمين = الدقة الفعلية التي ينفذها السيرفر
 // ============================================================================
 const QUALITY_MAP = {
-  10: 10,  // إذا اخترت 10% في التطبيق -> السيرفر يجعلها 10%
-  20: 15,  // إذا اخترت 20% في التطبيق -> السيرفر يجعلها 15% (كما طلبت)
-  40: 35,  // إذا اخترت 40% في التطبيق -> السيرفر يجعلها 35%
-  50: 45,  // إذا اخترت 50% في التطبيق -> السيرفر يجعلها 45%
-  70: 60,  // إذا اخترت 70% في التطبيق -> السيرفر يجعلها 60%
-  80: 70,  // إذا اخترت 80% في التطبيق -> السيرفر يجعلها 70%
-  90: 80,  // إذا اخترت 90% في التطبيق -> السيرفر يجعلها 80%
-  95: 45,  // إذا اخترت 95% في التطبيق -> السيرفر يجعلها 45% (مع إجبار الضغط)
+  10: 10,  // 10% في التطبيق -> 10% في السيرفر
+  20: 15,  // 20% في التطبيق -> 15% في السيرفر (توفير مضاعف للباقة)
+  40: 30,  // 40% في التطبيق -> 30% في السيرفر
+  50: 40,  // 50% في التطبيق -> 40% في السيرفر
+  70: 55,  // 70% في التطبيق -> 55% في السيرفر
+  80: 65,  // 80% في التطبيق -> 65% في السيرفر
+  90: 75,  // 90% في التطبيق -> 75% في السيرفر
+  95: 45,  // 95% في التطبيق -> 45% مع إجبار الضغط لكل الصور
 };
 
-// الدقة الافتراضية في حال لم يرسل التطبيق أي رقم
-const DEFAULT_QUALITY = 35;
-
-// خيار إجبار الضغط: ضع الرقم من التطبيق الذي تريد عند اختياره أن يضغط كل الصور إجبارياً
+const DEFAULT_QUALITY = 30;
 const FORCE_COMPRESSION_TRIGGER = 95;
 // ============================================================================
-
 
 const httpAgent = new http.Agent({
   keepAlive: true,
@@ -52,7 +48,7 @@ const httpsAgent = new https.Agent({
 });
 
 const axiosInstance = axios.create({
-  timeout: 12000,
+  timeout: 14000,
   responseType: 'arraybuffer',
   httpAgent,
   httpsAgent,
@@ -71,28 +67,22 @@ function getErrorText(error) {
   return String(error?.message || error || 'Unknown Error');
 }
 
+/*
+ * إرجاع رسالة نصية لا تستهلك أي باقة (أقل من 50 بايت) في حال فشل الصورة
+ */
 function getErrorCodeInfo(error) {
   const message = getErrorText(error);
-  const status = Number(
-    error?.upstreamStatus || error?.response?.status || 0,
-  );
+  const status = Number(error?.upstreamStatus || error?.response?.status || 0);
 
   if (status === 404 || /\b404\b|not found/i.test(message)) {
     return { httpStatus: 404, code: 'ERR_404_NOT_FOUND' };
   }
-
   if (status === 403 || /\b403\b|forbidden|cloudflare/i.test(message)) {
     return { httpStatus: 403, code: 'ERR_403_FORBIDDEN' };
   }
-
   if (/timeout|ETIMEDOUT|ECONNABORTED/i.test(message)) {
     return { httpStatus: 504, code: 'ERR_504_TIMEOUT' };
   }
-
-  if (/Content-Type|HTML|not an image|Invalid image|unsupported image/i.test(message)) {
-    return { httpStatus: 415, code: 'ERR_415_NOT_IMAGE' };
-  }
-
   return {
     httpStatus: status >= 400 ? status : 502,
     code: 'ERR_502_GENERAL_ERROR',
@@ -107,7 +97,6 @@ function sendTextError(res, error, extraDebug = '') {
     'Content-Type': 'text/plain; charset=utf-8',
     'Cache-Control': 'no-cache, no-store, must-revalidate',
     'X-Proxy-Status': info.code,
-    'X-Proxy-Error': encodeURIComponent(rawMessage.slice(0, 180)),
   });
 
   if (extraDebug) {
@@ -118,7 +107,7 @@ function sendTextError(res, error, extraDebug = '') {
 }
 
 /*
- * دالة توليد الروابط البديلة لتخطي حماية Cloudflare تلقائياً بدون تدخل منك
+ * بناء روابط بديلة تتخطى حماية Cloudflare وتسحب الصورة إلى سيرفرك ليتم ضغطها
  */
 function buildCandidateImageUrls(imageUrl) {
   const candidates = [];
@@ -141,29 +130,48 @@ function buildCandidateImageUrls(imageUrl) {
       sourceUrl.hostname = 'meshmanga.com';
       cleanTargetUrl = sourceUrl.toString();
 
-      // تصليح علامات الاقتباس الخاصة بموقع meshmanga
-      const repairedDirectUrl = cleanTargetUrl
+      // الرابط المعالج لعلامات التنصيص الخاصة بـ meshmanga
+      const doubleEncodedPath = sourceUrl.pathname.replace(
+        /%(?!25)([0-9a-f]{2})/gi,
+        '%25$1',
+      );
+      const repairedDirectUrl = `https://meshmanga.com${doubleEncodedPath}`
         .replace(/%25e2%80%99/gi, '%25e2%2580%2599')
         .replace(/%e2%80%99/gi, '%25e2%2580%2599');
 
-      // 1. استخدام وسطاء عالميين لتمرير رابط _next/image أو الرابط المباشر لتخطي حظر IP Vercel
-      const nextImg = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1920&q=85`;
-      
-      add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}&default=1`);
-      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg)}&default=1`);
-      add(`https://i0.wp.com/${sourceUrl.host}${sourceUrl.pathname}`);
-      add(`https://cdn.statically.io/img/${sourceUrl.host}${sourceUrl.pathname}`);
-      add(nextImg);
+      const nextImg1920 = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1920&q=75`;
+      const nextImgClean = `https://meshmanga.com/_next/image?url=${encodeURIComponent(cleanTargetUrl)}&w=1920&q=75`;
+
+      // 1. إذا كان لديك Cloudflare Worker خاص بك
+      if (process.env.CF_WORKER_URL) {
+        const baseWorker = process.env.CF_WORKER_URL.replace(/\/$/, '');
+        add(`${baseWorker}/?url=${encodeURIComponent(cleanTargetUrl)}`);
+        add(`${baseWorker}/?url=${encodeURIComponent(nextImg1920)}`);
+      }
+
+      // 2. سحب الصورة عبر وسطاء الصور المفتوحة لتجاوز حظر IP Vercel
+      add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
+      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg1920)}`);
+      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImgClean)}`);
+      add(`https://i0.wp.com/meshmanga.com${sourceUrl.pathname}`);
+      add(`https://cdn.statically.io/img/meshmanga.com${sourceUrl.pathname}`);
+
+      // 3. المحاولة المباشرة من Vercel
+      add(nextImg1920);
+      add(cleanTargetUrl);
       add(repairedDirectUrl);
+
       return candidates;
     }
   } catch (_) {}
 
-  // لأي موقع آخر غير meshmanga:
-  // المحاولة الأولى عبر وسيط wsrv لتخطي Cloudflare
-  add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}&default=1`);
+  if (process.env.CF_WORKER_URL) {
+    const baseWorker = process.env.CF_WORKER_URL.replace(/\/$/, '');
+    add(`${baseWorker}/?url=${encodeURIComponent(cleanTargetUrl)}`);
+  }
 
-  // المحاولة الثانية عبر وسيط Jetpack (WordPress CDN)
+  add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
+
   try {
     const parsed = new URL(cleanTargetUrl);
     if (parsed.protocol === 'https:') {
@@ -172,7 +180,6 @@ function buildCandidateImageUrls(imageUrl) {
     }
   } catch (_) {}
 
-  // المحاولة الأخيرة عبر الرابط المباشر
   add(cleanTargetUrl);
 
   return candidates;
@@ -188,11 +195,6 @@ async function makeGrayscaleWithoutResize(buffer, format) {
       return {
         buffer: await pipeline.webp({ lossless: true }).toBuffer(),
         contentType: 'image/webp',
-      };
-    case 'tiff':
-      return {
-        buffer: await pipeline.tiff({ compression: 'lzw' }).toBuffer(),
-        contentType: 'image/tiff',
       };
     case 'jpeg':
     case 'jpg':
@@ -234,7 +236,6 @@ function getQuality(req) {
     return DEFAULT_QUALITY;
   }
 
-  // إذا كانت القيمة موجودة في جدول QUALITY_MAP في أعلى الكود، نأخذ القيمة التي حددتها أنت
   if (Object.prototype.hasOwnProperty.call(QUALITY_MAP, parsed)) {
     return Math.max(1, Math.min(100, QUALITY_MAP[parsed]));
   }
@@ -246,7 +247,7 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v3.0-CustomQualityMap-CloudflareBypass');
+    return res.status(200).send('v3.1-StrictDataSaver-Active');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -254,10 +255,8 @@ app.get('/', async (req, res) => {
   }
 
   let parsedUrl;
-
   try {
     parsedUrl = new URL(imageUrl);
-
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
       throw new Error('Only HTTP and HTTPS URLs are allowed');
     }
@@ -277,17 +276,15 @@ app.get('/', async (req, res) => {
 
     const baseHeaders = {
       'User-Agent':
-        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-      'Sec-Ch-Ua': '"Chromium";v="124", "Google Chrome";v="124", "Not-A.Brand";v="99"',
-      'Sec-Ch-Ua-Mobile': '?0',
-      'Sec-Ch-Ua-Platform': '"Windows"',
-      'Sec-Fetch-Dest': 'image',
-      'Sec-Fetch-Mode': 'no-cors',
-      'Sec-Fetch-Site': 'cross-site',
     };
+
+    if (req.headers.cookie) {
+      baseHeaders.Cookie = req.headers.cookie;
+    }
 
     const candidateUrls = buildCandidateImageUrls(imageUrl);
     attemptedUpstreams = candidateUrls;
@@ -302,7 +299,6 @@ app.get('/', async (req, res) => {
       upstreamImageUrl = candidateUrl;
 
       try {
-        // إذا كان الرابط يمر عبر وسيط مجاني، لا نرسل Referer الموقع الأصلي حتى لا يرفضه الوسيط
         const isProxyService = /wsrv\.nl|wp\.com|statically\.io/i.test(candidateUrl);
         const currentHeaders = { ...baseHeaders };
         if (!isProxyService) {
@@ -326,20 +322,13 @@ app.get('/', async (req, res) => {
 
         if (candidateResponse.status < 200 || candidateResponse.status >= 300) {
           throw new UpstreamError(
-            `Upstream HTTP ${candidateResponse.status}`,
+            `HTTP ${candidateResponse.status}`,
             candidateResponse.status,
           );
         }
 
-        if (candidateBuffer.length === 0) {
-          throw new UpstreamError('Empty image buffer', candidateResponse.status);
-        }
-
-        if (candidateContentType.includes('text/html')) {
-          throw new UpstreamError(
-            `Invalid Content-Type: ${candidateContentType}`,
-            candidateResponse.status,
-          );
+        if (candidateBuffer.length === 0 || candidateContentType.includes('text/html')) {
+          throw new UpstreamError('Invalid payload', candidateResponse.status);
         }
 
         const candidateMetadata = await sharp(candidateBuffer, {
@@ -348,7 +337,7 @@ app.get('/', async (req, res) => {
         }).metadata();
 
         if (!candidateMetadata.format) {
-          throw new UpstreamError('Invalid image format', candidateResponse.status);
+          throw new UpstreamError('Not an image', candidateResponse.status);
         }
 
         response = candidateResponse;
@@ -404,9 +393,7 @@ app.get('/', async (req, res) => {
         'Content-Type': 'image/jpeg',
         'Content-Length': forcedBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Debug': `FORCED|quality=${quality}|outBytes=${forcedBuffer.length}`,
       });
-
       return res.status(200).send(forcedBuffer);
     }
 
@@ -415,7 +402,6 @@ app.get('/', async (req, res) => {
         'Content-Type': contentType || 'application/octet-stream',
         'Content-Length': responseBuffer.length,
         'Cache-Control': 'public, max-age=31536000, immutable',
-        'X-Proxy-Debug': `ORIGINAL|bytes=${responseBuffer.length}`,
       });
       return res.status(200).send(responseBuffer);
     }
@@ -478,11 +464,11 @@ app.get('/', async (req, res) => {
       'Content-Type': 'image/jpeg',
       'Content-Length': compressedBuffer.length,
       'Cache-Control': 'public, max-age=31536000, immutable',
-      'X-Proxy-Debug': `RESIZED|quality=${quality}|outBytes=${compressedBuffer.length}`,
     });
 
     return res.status(200).send(compressedBuffer);
   } catch (error) {
+    // في حال الفشل التام: نرجع خطأ نصي خفيف (بضع بايتات فقط) ولا نسمح بتحميل الصورة الأصلية أبداً لحماية الباقة
     const errorStatus = error.upstreamStatus || error.response?.status || 0;
     const errorMessage = error.message || 'Fetch Failed';
     const debugHeader = `ERROR|attempts=${attemptedUpstreams.length}|status=${errorStatus}|msg=${encodeURIComponent(errorMessage.slice(0, 140))}`;
