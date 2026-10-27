@@ -12,7 +12,7 @@ const app = express();
 // ============================================================================
 const QUALITY_MAP = {
   10: 10,  // 10% في التطبيق -> 10% في السيرفر
-  20: 15,  // 20% في التطبيق -> 15% في السيرفر (توفير مضاعف للباقة)
+  20: 15,  // 20% في التطبيق -> 15% في السيرفر (كما طلبت)
   40: 30,  // 40% في التطبيق -> 30% في السيرفر
   50: 40,  // 50% في التطبيق -> 40% في السيرفر
   70: 55,  // 70% في التطبيق -> 55% في السيرفر
@@ -25,30 +25,15 @@ const DEFAULT_QUALITY = 30;
 const FORCE_COMPRESSION_TRIGGER = 95;
 // ============================================================================
 
-const httpAgent = new http.Agent({
-  keepAlive: true,
-  maxSockets: 50,
-});
-
+const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
 const httpsAgent = new https.Agent({
   keepAlive: true,
-  maxSockets: 50,
+  maxSockets: 100,
   rejectUnauthorized: false,
-  ciphers: [
-    'TLS_AES_128_GCM_SHA256',
-    'TLS_AES_256_GCM_SHA384',
-    'TLS_CHACHA20_POLY1305_SHA256',
-    'ECDHE-ECDSA-AES128-GCM-SHA256',
-    'ECDHE-RSA-AES128-GCM-SHA256',
-    'ECDHE-ECDSA-AES256-GCM-SHA384',
-    'ECDHE-RSA-AES256-GCM-SHA384',
-  ].join(':'),
-  honorCipherOrder: true,
-  minVersion: 'TLSv1.2',
 });
 
 const axiosInstance = axios.create({
-  timeout: 14000,
+  timeout: 6500,
   responseType: 'arraybuffer',
   httpAgent,
   httpsAgent,
@@ -67,9 +52,6 @@ function getErrorText(error) {
   return String(error?.message || error || 'Unknown Error');
 }
 
-/*
- * إرجاع رسالة نصية لا تستهلك أي باقة (أقل من 50 بايت) في حال فشل الصورة
- */
 function getErrorCodeInfo(error) {
   const message = getErrorText(error);
   const status = Number(error?.upstreamStatus || error?.response?.status || 0);
@@ -107,7 +89,7 @@ function sendTextError(res, error, extraDebug = '') {
 }
 
 /*
- * بناء روابط بديلة تتخطى حماية Cloudflare وتسحب الصورة إلى سيرفرك ليتم ضغطها
+ * توليد روابط تتضمن بروكسي قوقل الرسمي الذي لا تحظره Cloudflare أبداً
  */
 function buildCandidateImageUrls(imageUrl) {
   const candidates = [];
@@ -130,7 +112,6 @@ function buildCandidateImageUrls(imageUrl) {
       sourceUrl.hostname = 'meshmanga.com';
       cleanTargetUrl = sourceUrl.toString();
 
-      // الرابط المعالج لعلامات التنصيص الخاصة بـ meshmanga
       const doubleEncodedPath = sourceUrl.pathname.replace(
         /%(?!25)([0-9a-f]{2})/gi,
         '%25$1',
@@ -139,44 +120,34 @@ function buildCandidateImageUrls(imageUrl) {
         .replace(/%25e2%80%99/gi, '%25e2%2580%2599')
         .replace(/%e2%80%99/gi, '%25e2%2580%2599');
 
-      const nextImg1920 = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1920&q=75`;
-      const nextImgClean = `https://meshmanga.com/_next/image?url=${encodeURIComponent(cleanTargetUrl)}&w=1920&q=75`;
+      const nextImg = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1920&q=80`;
 
-      // 1. إذا كان لديك Cloudflare Worker خاص بك
-      if (process.env.CF_WORKER_URL) {
-        const baseWorker = process.env.CF_WORKER_URL.replace(/\/$/, '');
-        add(`${baseWorker}/?url=${encodeURIComponent(cleanTargetUrl)}`);
-        add(`${baseWorker}/?url=${encodeURIComponent(nextImg1920)}`);
-      }
+      // 1. بروكسي قوقل الرسمي (Google Feedfetcher / Gadget Proxy) - يتخطى Cloudflare بقوة
+      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(cleanTargetUrl)}`);
+      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(nextImg)}`);
 
-      // 2. سحب الصورة عبر وسطاء الصور المفتوحة لتجاوز حظر IP Vercel
+      // 2. وسطاء الصور العالمية
       add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
-      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg1920)}`);
-      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImgClean)}`);
+      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg)}`);
       add(`https://i0.wp.com/meshmanga.com${sourceUrl.pathname}`);
-      add(`https://cdn.statically.io/img/meshmanga.com${sourceUrl.pathname}`);
 
-      // 3. المحاولة المباشرة من Vercel
-      add(nextImg1920);
+      // 3. الدومين البديل للموقع + الروابط المباشرة
+      add(`https://appswat.com${sourceUrl.pathname}`);
+      add(nextImg);
       add(cleanTargetUrl);
-      add(repairedDirectUrl);
 
       return candidates;
     }
   } catch (_) {}
 
-  if (process.env.CF_WORKER_URL) {
-    const baseWorker = process.env.CF_WORKER_URL.replace(/\/$/, '');
-    add(`${baseWorker}/?url=${encodeURIComponent(cleanTargetUrl)}`);
-  }
-
+  // لأي موقع آخر:
+  add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(cleanTargetUrl)}`);
   add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
 
   try {
     const parsed = new URL(cleanTargetUrl);
     if (parsed.protocol === 'https:') {
       add(`https://i0.wp.com/${parsed.host}${parsed.pathname}${parsed.search}`);
-      add(`https://cdn.statically.io/img/${parsed.host}${parsed.pathname}`);
     }
   } catch (_) {}
 
@@ -243,11 +214,52 @@ function getQuality(req) {
   return Math.max(1, Math.min(100, parsed));
 }
 
+/*
+ * دالة جلب صورة واحدة وفحص أنها صورة حقيقية وليست صفحة خطأ
+ */
+async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer) {
+  const isProxyService = /googleusercontent\.com|wsrv\.nl|wp\.com/i.test(candidateUrl);
+  const currentHeaders = { ...baseHeaders };
+
+  if (!isProxyService) {
+    currentHeaders.Referer = upstreamReferer;
+    currentHeaders.Origin = upstreamReferer.replace(/\/$/, '');
+  }
+
+  const res = await axiosInstance.get(candidateUrl, { headers: currentHeaders });
+
+  if (res.status < 200 || res.status >= 300) {
+    throw new UpstreamError(`HTTP ${res.status}`, res.status);
+  }
+
+  const contentType = String(res.headers['content-type'] || '')
+    .split(';', 1)[0]
+    .trim()
+    .toLowerCase();
+
+  const buffer = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data || '');
+
+  if (buffer.length < 100 || contentType.includes('text/html')) {
+    throw new UpstreamError('Invalid image payload', res.status);
+  }
+
+  const metadata = await sharp(buffer, {
+    failOn: 'none',
+    limitInputPixels: false,
+  }).metadata();
+
+  if (!metadata.format) {
+    throw new UpstreamError('Unsupported image format', res.status);
+  }
+
+  return { buffer, contentType, metadata, candidateUrl };
+}
+
 app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v3.1-StrictDataSaver-Active');
+    return res.status(200).send('v4.0-ParallelGoogleBypass-Active');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -264,8 +276,7 @@ app.get('/', async (req, res) => {
     return sendTextError(res, error);
   }
 
-  let upstreamImageUrl = imageUrl;
-  let attemptedUpstreams = [];
+  const candidateUrls = buildCandidateImageUrls(imageUrl);
 
   try {
     const defaultReferer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
@@ -276,6 +287,7 @@ app.get('/', async (req, res) => {
 
     const baseHeaders = {
       'User-Agent':
+        req.headers['user-agent'] ||
         'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
@@ -286,73 +298,14 @@ app.get('/', async (req, res) => {
       baseHeaders.Cookie = req.headers.cookie;
     }
 
-    const candidateUrls = buildCandidateImageUrls(imageUrl);
-    attemptedUpstreams = candidateUrls;
+    // تشغيل جميع المحاولات في نفس اللحظة (بالتوازي) وأخذ أول صورة تنجح فوراً بدون انتظار!
+    const winner = await Promise.any(
+      candidateUrls.map((url) => fetchValidImage(url, baseHeaders, upstreamReferer)),
+    );
 
-    let response = null;
-    let responseBuffer = null;
-    let contentType = '';
-    let metadata = null;
-    let lastCandidateError = null;
-
-    for (const candidateUrl of candidateUrls) {
-      upstreamImageUrl = candidateUrl;
-
-      try {
-        const isProxyService = /wsrv\.nl|wp\.com|statically\.io/i.test(candidateUrl);
-        const currentHeaders = { ...baseHeaders };
-        if (!isProxyService) {
-          currentHeaders.Referer = upstreamReferer;
-        }
-
-        const candidateResponse = await axiosInstance.get(candidateUrl, {
-          headers: currentHeaders,
-        });
-
-        const candidateContentType = String(
-          candidateResponse.headers['content-type'] || '',
-        )
-          .split(';', 1)[0]
-          .trim()
-          .toLowerCase();
-
-        const candidateBuffer = Buffer.isBuffer(candidateResponse.data)
-          ? candidateResponse.data
-          : Buffer.from(candidateResponse.data || '');
-
-        if (candidateResponse.status < 200 || candidateResponse.status >= 300) {
-          throw new UpstreamError(
-            `HTTP ${candidateResponse.status}`,
-            candidateResponse.status,
-          );
-        }
-
-        if (candidateBuffer.length === 0 || candidateContentType.includes('text/html')) {
-          throw new UpstreamError('Invalid payload', candidateResponse.status);
-        }
-
-        const candidateMetadata = await sharp(candidateBuffer, {
-          failOn: 'none',
-          limitInputPixels: false,
-        }).metadata();
-
-        if (!candidateMetadata.format) {
-          throw new UpstreamError('Not an image', candidateResponse.status);
-        }
-
-        response = candidateResponse;
-        responseBuffer = candidateBuffer;
-        contentType = candidateContentType;
-        metadata = candidateMetadata;
-        break;
-      } catch (candidateError) {
-        lastCandidateError = candidateError;
-      }
-    }
-
-    if (!response || !responseBuffer || !metadata) {
-      throw lastCandidateError || new UpstreamError('All image candidates failed');
-    }
+    const responseBuffer = winner.buffer;
+    const contentType = winner.contentType;
+    const metadata = winner.metadata;
 
     const width = metadata.width || 800;
     const height = metadata.height || 1200;
@@ -467,12 +420,10 @@ app.get('/', async (req, res) => {
     });
 
     return res.status(200).send(compressedBuffer);
-  } catch (error) {
-    // في حال الفشل التام: نرجع خطأ نصي خفيف (بضع بايتات فقط) ولا نسمح بتحميل الصورة الأصلية أبداً لحماية الباقة
-    const errorStatus = error.upstreamStatus || error.response?.status || 0;
-    const errorMessage = error.message || 'Fetch Failed';
-    const debugHeader = `ERROR|attempts=${attemptedUpstreams.length}|status=${errorStatus}|msg=${encodeURIComponent(errorMessage.slice(0, 140))}`;
-    return sendTextError(res, error, debugHeader);
+  } catch (aggregateError) {
+    const errors = aggregateError.errors || [aggregateError];
+    const firstErr = errors[0] || new UpstreamError('All candidates failed', 403);
+    return sendTextError(res, firstErr);
   }
 });
 
