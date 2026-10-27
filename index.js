@@ -12,7 +12,7 @@ const app = express();
 // ============================================================================
 const QUALITY_MAP = {
   10: 10,  // 10% في التطبيق -> 10% في السيرفر
-  20: 15,  // 20% في التطبيق -> 15% في السيرفر (كما طلبت)
+  20: 15,  // 20% في التطبيق -> 15% في السيرفر
   40: 30,  // 40% في التطبيق -> 30% في السيرفر
   50: 40,  // 50% في التطبيق -> 40% في السيرفر
   70: 55,  // 70% في التطبيق -> 55% في السيرفر
@@ -25,22 +25,12 @@ const DEFAULT_QUALITY = 30;
 const FORCE_COMPRESSION_TRIGGER = 95;
 // ============================================================================
 
+// نفس إعدادات الاتصال الأصلية لـ v4.0 التي اشتغلت مع سوات مانجا بدون أي تعقيد في TLS
 const httpAgent = new http.Agent({ keepAlive: true, maxSockets: 100 });
 const httpsAgent = new https.Agent({
   keepAlive: true,
   maxSockets: 100,
   rejectUnauthorized: false,
-  ciphers: [
-    'TLS_AES_128_GCM_SHA256',
-    'TLS_AES_256_GCM_SHA384',
-    'TLS_CHACHA20_POLY1305_SHA256',
-    'ECDHE-ECDSA-AES128-GCM-SHA256',
-    'ECDHE-RSA-AES128-GCM-SHA256',
-    'ECDHE-ECDSA-AES256-GCM-SHA384',
-    'ECDHE-RSA-AES256-GCM-SHA384',
-  ].join(':'),
-  honorCipherOrder: true,
-  minVersion: 'TLSv1.2',
 });
 
 const axiosInstance = axios.create({
@@ -100,20 +90,7 @@ function sendTextError(res, error, extraDebug = '') {
 }
 
 /*
- * استخراج الدومين الرئيسي للموقع (مثلاً تحويل img.mangatek.com إلى mangatek.com)
- * لأن سيرفرات الصور تعطي خطأ 404 إذا لم يكن الـ Referer هو الموقع الرئيسي
- */
-function getRootDomainReferer(parsedUrl) {
-  const hostParts = parsedUrl.hostname.split('.');
-  if (hostParts.length > 2 && /^(img|cdn|media|static|images|storage|s\d+)$/i.test(hostParts[0])) {
-    const rootDomain = hostParts.slice(1).join('.');
-    return `${parsedUrl.protocol}//${rootDomain}/`;
-  }
-  return `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
-}
-
-/*
- * توليد روابط بديلة ذكية لكل من سوات مانجا و MangaTek وبقية المواقع
+ * توليد الروابط البديلة مع فصل كل موقع على حدة
  */
 function buildCandidateImageUrls(imageUrl) {
   const candidates = [];
@@ -129,7 +106,9 @@ function buildCandidateImageUrls(imageUrl) {
     const sourceUrl = new URL(imageUrl);
     const host = sourceUrl.hostname.toLowerCase();
 
-    // 1. معالجة خاصة لموقع سوات مانجا (meshmanga / appswat)
+    // ========================================================================
+    // 1. قسم سوات مانجا (نفس كود v4.0 الذي اشتغل معك بالضبط بدون أي تغيير)
+    // ========================================================================
     if (
       (host === 'appswat.com' || host === 'meshmanga.com') &&
       sourceUrl.pathname.startsWith('/v2/media/')
@@ -152,38 +131,55 @@ function buildCandidateImageUrls(imageUrl) {
       add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
       add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg)}`);
       add(`https://i0.wp.com/meshmanga.com${sourceUrl.pathname}`);
+      add(`https://appswat.com${sourceUrl.pathname}`);
       add(nextImg);
       add(cleanTargetUrl);
 
       return candidates;
     }
 
-    // 2. معالجة خاصة لموقع MangaTek وأي موقع يضع ?v= يسبب خطأ 404 في الوسطاء
-    const urlWithoutQuery = `${sourceUrl.origin}${sourceUrl.pathname}`;
+    // ========================================================================
+    // 2. قسم موقع MangaTek (معزول تماماً مع تجربة جميع المنافذ الممكنة له)
+    // ========================================================================
+    if (host.includes('mangatek.com')) {
+      const noQueryUrl = `${sourceUrl.origin}${sourceUrl.pathname}`;
+      // تجربة الدومين الرئيسي بدلاً من img.mangatek.com في حال كان مسار الصور مشتركاً
+      const mainDomainUrl = `https://mangatek.com${sourceUrl.pathname}${sourceUrl.search}`;
 
-    // المحاولة المباشرة أولاً (مع Referer الموقع الرئيسي ستعمل فوراً)
-    add(cleanTargetUrl);
-    if (urlWithoutQuery !== cleanTargetUrl) {
-      add(urlWithoutQuery);
-    }
+      // محولات قوقل المتعددة (gadget + blogger proxy)
+      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(imageUrl)}`);
+      add(`https://images2-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(noQueryUrl)}`);
 
-    // بروكسي قوقل الرسمي (مع وبدون ?v=)
-    add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(urlWithoutQuery)}`);
-    add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(cleanTargetUrl)}`);
-
-    // وسيط wsrv.nl (مع وبدون ?v=)
-    add(`https://wsrv.nl/?url=${encodeURIComponent(urlWithoutQuery)}`);
-    add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
-
-    // وسيط Jetpack (بدون ?v= لأن Jetpack يرفض الاستعلامات غير المعروفة ويعطي 404)
-    if (sourceUrl.protocol === 'https:') {
+      // وسطاء CDN المتعددة
+      add(`https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}`);
+      add(`https://wsrv.nl/?url=${encodeURIComponent(noQueryUrl)}`);
+      add(`https://cdn.statically.io/img/${sourceUrl.host}${sourceUrl.pathname}`);
       add(`https://i0.wp.com/${sourceUrl.host}${sourceUrl.pathname}`);
-    }
 
-    return candidates;
+      // الروابط المباشرة
+      add(imageUrl);
+      add(noQueryUrl);
+      add(mainDomainUrl);
+
+      return candidates;
+    }
+  } catch (_) {}
+
+  // ========================================================================
+  // 3. أي موقع آخر
+  // ========================================================================
+  add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(cleanTargetUrl)}`);
+  add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
+
+  try {
+    const parsed = new URL(cleanTargetUrl);
+    if (parsed.protocol === 'https:') {
+      add(`https://i0.wp.com/${parsed.host}${parsed.pathname}${parsed.search}`);
+    }
   } catch (_) {}
 
   add(cleanTargetUrl);
+
   return candidates;
 }
 
@@ -245,23 +241,18 @@ function getQuality(req) {
   return Math.max(1, Math.min(100, parsed));
 }
 
-async function fetchValidImage(candidateUrl, baseHeaders, rootReferer, directReferer) {
-  const isProxyService = /googleusercontent\.com|wsrv\.nl|wp\.com/i.test(candidateUrl);
+async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, isMangaTek) {
+  const isProxyService = /googleusercontent\.com|wsrv\.nl|wp\.com|statically\.io/i.test(candidateUrl);
   const currentHeaders = { ...baseHeaders };
 
   if (!isProxyService) {
-    // نرسل Referer الدومين الرئيسي (مثل https://mangatek.com/) لتجنب خطأ 404 و 403
-    currentHeaders.Referer = rootReferer;
-    currentHeaders.Origin = rootReferer.replace(/\/$/, '');
+    currentHeaders.Referer = isMangaTek ? 'https://mangatek.com/' : upstreamReferer;
+    if (!isMangaTek) {
+      currentHeaders.Origin = upstreamReferer.replace(/\/$/, '');
+    }
   }
 
-  let res = await axiosInstance.get(candidateUrl, { headers: currentHeaders });
-
-  // إذا فشل الطلب المباشر بـ rootReferer، نجرب مرة سريعة بدون Referer نهائياً (بعض السيرفرات تمنع الـ Referer)
-  if (!isProxyService && (res.status === 403 || res.status === 404)) {
-    const noRefHeaders = { ...baseHeaders };
-    res = await axiosInstance.get(candidateUrl, { headers: noRefHeaders });
-  }
+  const res = await axiosInstance.get(candidateUrl, { headers: currentHeaders });
 
   if (res.status < 200 || res.status >= 300) {
     throw new UpstreamError(`HTTP ${res.status}`, res.status);
@@ -294,7 +285,7 @@ app.get('/', async (req, res) => {
   const imageUrl = req.query.url;
 
   if (!imageUrl) {
-    return res.status(200).send('v4.5-MangaTek-And-Swat-Ready');
+    return res.status(200).send('v4.1-RestoredSwat-IsolatedMangaTek');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -311,34 +302,33 @@ app.get('/', async (req, res) => {
     return sendTextError(res, error);
   }
 
+  const isMangaTek = parsedUrl.hostname.toLowerCase().includes('mangatek.com');
   const candidateUrls = buildCandidateImageUrls(imageUrl);
 
   try {
-    const directReferer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
-    const rootReferer =
+    const defaultReferer = `${parsedUrl.protocol}//${parsedUrl.hostname}/`;
+    const upstreamReferer =
       typeof req.query.referer === 'string'
         ? req.query.referer
-        : process.env.UPSTREAM_REFERER || getRootDomainReferer(parsedUrl);
+        : process.env.UPSTREAM_REFERER || defaultReferer;
 
+    // نفس الهيدرز النظيفة لـ v4.0 التي لا تسبب حظر 404 مع سيرفر قوقل
     const baseHeaders = {
       'User-Agent':
+        req.headers['user-agent'] ||
         'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
-      'Sec-Fetch-Dest': 'image',
-      'Sec-Fetch-Mode': 'no-cors',
-      'Sec-Fetch-Site': 'same-site',
     };
 
     if (req.headers.cookie) {
       baseHeaders.Cookie = req.headers.cookie;
     }
 
-    // سباق متوازي بين جميع الروابط (المباشر + بدون ?v= + قوقل + الوسطاء)
     const winner = await Promise.any(
       candidateUrls.map((url) =>
-        fetchValidImage(url, baseHeaders, rootReferer, directReferer),
+        fetchValidImage(url, baseHeaders, upstreamReferer, isMangaTek),
       ),
     );
 
@@ -461,8 +451,10 @@ app.get('/', async (req, res) => {
     return res.status(200).send(compressedBuffer);
   } catch (aggregateError) {
     const errors = aggregateError.errors || [aggregateError];
-    const firstErr = errors[0] || new UpstreamError('All candidates failed', 404);
-    return sendTextError(res, firstErr);
+    // إذا كان هناك خطأ 403 بين المحاولات نظهره بدلاً من إظهار 404 الخاص بأحد الوسطاء
+    const forbiddenErr = errors.find((e) => e.upstreamStatus === 403);
+    const primaryErr = forbiddenErr || errors[0] || new UpstreamError('All candidates failed', 403);
+    return sendTextError(res, primaryErr);
   }
 });
 
