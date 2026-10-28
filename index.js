@@ -4,7 +4,6 @@ const sharp = require('sharp');
 const http = require('http');
 const https = require('https');
 
-// تحسين أداء الذاكرة والمعالج على سيرفرات Vercel Serverless
 sharp.cache(false);
 sharp.concurrency(2);
 
@@ -93,7 +92,10 @@ function sendTextError(res, error, extraDebug = '') {
   return res.status(info.httpStatus).send(`${info.code}: ${rawMessage}`);
 }
 
-function buildCandidateImageUrls(imageUrl) {
+/*
+ * تمرير العرض المطلوب للوسطاء لسحب الصورة بحجم خفيف وسريع جداً بدلاً من سحبها بحجم 5 ميغا
+ */
+function buildCandidateImageUrls(imageUrl, hintWidth = 800) {
   const candidates = [];
   const add = (value) => {
     if (typeof value === 'string' && value && !candidates.includes(value)) {
@@ -107,9 +109,6 @@ function buildCandidateImageUrls(imageUrl) {
     const sourceUrl = new URL(imageUrl);
     const host = sourceUrl.hostname.toLowerCase();
 
-    // ========================================================================
-    // 1. قسم سوات مانجا (نفس الروابط المضمونة 100% بدون حذف أي منها)
-    // ========================================================================
     if (
       (host === 'appswat.com' || host === 'meshmanga.com') &&
       sourceUrl.pathname.startsWith('/v2/media/')
@@ -125,48 +124,30 @@ function buildCandidateImageUrls(imageUrl) {
         .replace(/%25e2%80%99/gi, '%25e2%2580%2599')
         .replace(/%e2%80%99/gi, '%25e2%2580%2599');
 
-      const nextImg = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1920&q=80`;
+      // نطلب عرض 1080 بدلاً من 1920 لتسريع استجابة موقع سوات مانجا للضعف
+      const nextImg = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1080&q=75`;
 
-      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(cleanTargetUrl)}`);
+      // نجعل wsrv يصغر العرض مسبقاً لتصل الصورة إلى Vercel في لمح البصر
+      add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}&w=${hintWidth}&we`);
+      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000& resize_w=${hintWidth}&url=${encodeURIComponent(cleanTargetUrl)}`);
       add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(nextImg)}`);
-      add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
-      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg)}`);
-      add(`https://i0.wp.com/meshmanga.com${sourceUrl.pathname}`);
+      add(`https://wsrv.nl/?url=${encodeURIComponent(nextImg)}&w=${hintWidth}&we`);
+      add(`https://i0.wp.com/meshmanga.com${sourceUrl.pathname}?w=${hintWidth}`);
       add(`https://appswat.com${sourceUrl.pathname}`);
       add(nextImg);
       add(cleanTargetUrl);
 
       return candidates;
     }
-
-    // ========================================================================
-    // 2. قسم موقع MangaTek
-    // ========================================================================
-    if (host.includes('mangatek.com')) {
-      const noQueryUrl = `${sourceUrl.origin}${sourceUrl.pathname}`;
-
-      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(imageUrl)}`);
-      add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(noQueryUrl)}`);
-      add(`https://wsrv.nl/?url=${encodeURIComponent(imageUrl)}`);
-      add(`https://wsrv.nl/?url=${encodeURIComponent(noQueryUrl)}`);
-      add(`https://i0.wp.com/${sourceUrl.host}${sourceUrl.pathname}`);
-      add(imageUrl);
-      add(noQueryUrl);
-
-      return candidates;
-    }
   } catch (_) {}
 
-  // ========================================================================
-  // 3. أي موقع آخر
-  // ========================================================================
+  add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}&w=${hintWidth}&we`);
   add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(cleanTargetUrl)}`);
-  add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
 
   try {
     const parsed = new URL(cleanTargetUrl);
     if (parsed.protocol === 'https:') {
-      add(`https://i0.wp.com/${parsed.host}${parsed.pathname}${parsed.search}`);
+      add(`https://i0.wp.com/${parsed.host}${parsed.pathname}?w=${hintWidth}`);
     }
   } catch (_) {}
 
@@ -190,7 +171,7 @@ async function makeGrayscaleWithoutResize(buffer, format) {
     case 'jpg':
       return {
         buffer: await pipeline
-          .jpeg({ quality: 90, chromaSubsampling: '4:4:4' })
+          .jpeg({ quality: 85, chromaSubsampling: '4:2:0' })
           .toBuffer(),
         contentType: 'image/jpeg',
       };
@@ -233,15 +214,13 @@ function getQuality(req) {
   return Math.max(1, Math.min(100, parsed));
 }
 
-async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, isMangaTek, signal) {
-  const isProxyService = /googleusercontent\.com|wsrv\.nl|wp\.com|statically\.io/i.test(candidateUrl);
+async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, signal) {
+  const isProxyService = /googleusercontent\.com|wsrv\.nl|wp\.com/i.test(candidateUrl);
   const currentHeaders = { ...baseHeaders };
 
   if (!isProxyService) {
-    currentHeaders.Referer = isMangaTek ? 'https://mangatek.com/' : upstreamReferer;
-    if (!isMangaTek) {
-      currentHeaders.Origin = upstreamReferer.replace(/\/$/, '');
-    }
+    currentHeaders.Referer = upstreamReferer;
+    currentHeaders.Origin = upstreamReferer.replace(/\/$/, '');
   }
 
   try {
@@ -258,24 +237,16 @@ async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, isMan
     const buffer = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data || '');
 
     if (res.status < 200 || res.status >= 300) {
-      const bodyPreview = buffer.toString('utf8', 0, 160).replace(/\s+/g, ' ');
       throw new UpstreamError(`HTTP ${res.status}`, res.status, {
         candidateUrl,
         status: res.status,
-        contentType,
-        bodyPreview,
       });
     }
 
-    // فحص سريع جداً للبايتات بدون إشغال معالج sharp لكل رابط
     if (buffer.length < 150 || contentType.includes('text/html') || contentType.includes('application/json')) {
-      const bodyPreview = buffer.toString('utf8', 0, 160).replace(/\s+/g, ' ');
-      throw new UpstreamError('Invalid image payload (HTML or empty)', res.status, {
+      throw new UpstreamError('Invalid payload', res.status, {
         candidateUrl,
         status: res.status,
-        contentType,
-        bytes: buffer.length,
-        bodyPreview,
       });
     }
 
@@ -284,13 +255,13 @@ async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, isMan
     if (err instanceof UpstreamError) throw err;
     throw new UpstreamError(err.message || 'Network Error', 0, {
       candidateUrl,
-      code: err.code || 'NETWORK_ERR',
       message: err.message,
     });
   }
 }
 
 app.get('/', async (req, res) => {
+  const startTotalTime = Date.now();
   let imageUrl = req.query.url;
   if (typeof imageUrl === 'string' && req.query.v && !imageUrl.includes('?v=')) {
     imageUrl = `${imageUrl}?v=${req.query.v}`;
@@ -299,7 +270,7 @@ app.get('/', async (req, res) => {
   const isDebugMode = req.query.debug === '1' || req.query.debug === 'true';
 
   if (!imageUrl) {
-    return res.status(200).send('v4.6-FastOptimized-Ready');
+    return res.status(200).send('v4.8-UltraFast-SpeedTest-Ready');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -316,8 +287,12 @@ app.get('/', async (req, res) => {
     return sendTextError(res, error);
   }
 
-  const isMangaTek = parsedUrl.hostname.toLowerCase().includes('mangatek.com');
-  const candidateUrls = buildCandidateImageUrls(imageUrl);
+  const quality = getQuality(req);
+  const baseTargetWidth = Math.round(390 + (quality / 100) * 900);
+  // نطلب عرضاً مبدئياً (مثلاً 780 بكسل) من الوسيط لتسريع النقل الداخلي 10 أضعاف
+  const preFetchWidth = Math.max(baseTargetWidth, 780);
+
+  const candidateUrls = buildCandidateImageUrls(imageUrl, preFetchWidth);
   const controllers = candidateUrls.map(() => new AbortController());
 
   try {
@@ -327,7 +302,6 @@ app.get('/', async (req, res) => {
         ? req.query.referer
         : process.env.UPSTREAM_REFERER || defaultReferer;
 
-    // استخدام User-Agent أندرويد الموحد دائماً (لجعل سرعة التطبيق مطابقة لسرعة المتصفح وعدم إرسال اسم Tachiyomi للوسطاء)
     const baseHeaders = {
       'User-Agent':
         'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
@@ -340,16 +314,15 @@ app.get('/', async (req, res) => {
       baseHeaders.Cookie = req.headers.cookie;
     }
 
+    const startFetchTime = Date.now();
     const winner = await Promise.any(
       candidateUrls.map((url, index) =>
         fetchValidImage(
           url,
           baseHeaders,
           upstreamReferer,
-          isMangaTek,
           controllers[index].signal,
         ).then((result) => {
-          // إيقاف جميع الروابط الأخرى فوراً بمجرد وصول أول صورة ناجحة لتوفير سرعة المعالج والإنترنت
           controllers.forEach((ctrl, i) => {
             if (i !== index) ctrl.abort();
           });
@@ -357,11 +330,12 @@ app.get('/', async (req, res) => {
         }),
       ),
     );
+    const fetchTimeMs = Date.now() - startFetchTime;
 
+    const startSharpTime = Date.now();
     const responseBuffer = winner.buffer;
     const contentType = winner.contentType;
 
-    // قراءة أبعاد الصورة مرة واحدة فقط للصورة الفائزة
     const metadata = await sharp(responseBuffer, {
       failOn: 'none',
       limitInputPixels: false,
@@ -371,21 +345,9 @@ app.get('/', async (req, res) => {
       throw new UpstreamError('Unsupported image format', 415);
     }
 
-    if (isDebugMode && req.query.info === '1') {
-      return res.status(200).json({
-        success: true,
-        winnerUrl: winner.candidateUrl,
-        format: metadata.format,
-        width: metadata.width,
-        height: metadata.height,
-        originalSizeKB: Math.round(responseBuffer.length / 1024),
-      });
-    }
-
     const width = metadata.width || 800;
     const height = metadata.height || 1200;
     const fileSizeInKB = responseBuffer.length / 1024;
-    const quality = getQuality(req);
 
     const dynamicThresholdKB = 100 + (quality - 10) * 5;
     const isLongStrip = height / width >= 3.0 || height > 3500;
@@ -400,11 +362,19 @@ app.get('/', async (req, res) => {
     const forceCompression = isForcedCompression(req);
     const shouldResize = fileSizeInKB > effectiveThresholdKB;
 
+    const targetWidth =
+      height > 5000
+        ? Math.max(baseTargetWidth, Math.min(width, 780))
+        : baseTargetWidth;
+
+    let finalBuffer = responseBuffer;
+    let finalContentType = contentType || 'image/jpeg';
+
     if (forceCompression) {
-      const forcedBuffer = await sharp(responseBuffer, {
+      finalBuffer = await sharp(responseBuffer, {
         failOn: 'none',
         limitInputPixels: false,
-        fastShrinkOnLoad: !isLongStrip,
+        fastShrinkOnLoad: true,
       })
         .rotate()
         .jpeg({
@@ -412,91 +382,80 @@ app.get('/', async (req, res) => {
           chromaSubsampling: quality < 50 ? '4:2:0' : '4:4:4',
         })
         .toBuffer();
-
-      res.set({
-        'Content-Type': 'image/jpeg',
-        'Content-Length': forcedBuffer.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-      });
-      return res.status(200).send(forcedBuffer);
-    }
-
-    if (!shouldResize && !isGrayscale) {
-      res.set({
-        'Content-Type': contentType || 'application/octet-stream',
-        'Content-Length': responseBuffer.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-      });
-      return res.status(200).send(responseBuffer);
-    }
-
-    if (!shouldResize && isGrayscale) {
+      finalContentType = 'image/jpeg';
+    } else if (!shouldResize && isGrayscale) {
       const gray = await makeGrayscaleWithoutResize(responseBuffer, metadata.format);
-      res.set({
-        'Content-Type': gray.contentType,
-        'Content-Length': gray.buffer.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
-      });
-      return res.status(200).send(gray.buffer);
+      finalBuffer = gray.buffer;
+      finalContentType = gray.contentType;
+    } else if (shouldResize) {
+      let pipeline = sharp(responseBuffer, {
+        failOn: 'none',
+        limitInputPixels: false,
+        fastShrinkOnLoad: true,
+      }).rotate();
+
+      if (width > targetWidth) {
+        pipeline = pipeline.resize({
+          width: targetWidth,
+          fit: 'inside',
+          withoutEnlargement: true,
+          fastShrinkOnLoad: true,
+        });
+      }
+
+      if (isGrayscale) {
+        pipeline = pipeline.grayscale();
+      }
+
+      const compressedBuffer = await pipeline
+        .jpeg({
+          quality,
+          chromaSubsampling: quality < 50 ? '4:2:0' : '4:4:4',
+        })
+        .toBuffer();
+
+      if (isGrayscale || compressedBuffer.length < responseBuffer.length) {
+        finalBuffer = compressedBuffer;
+        finalContentType = 'image/jpeg';
+      }
     }
 
-    let pipeline = sharp(responseBuffer, {
-      failOn: 'none',
-      limitInputPixels: false,
-      fastShrinkOnLoad: !isLongStrip,
-    }).rotate();
+    const sharpTimeMs = Date.now() - startSharpTime;
+    const totalServerTimeMs = Date.now() - startTotalTime;
 
-    const baseTargetWidth = Math.round(390 + (quality / 100) * 900);
-    const targetWidth =
-      height > 5000
-        ? Math.max(baseTargetWidth, Math.min(width, 780))
-        : baseTargetWidth;
-
-    pipeline = pipeline.resize({
-      width: targetWidth,
-      fit: 'inside',
-      withoutEnlargement: true,
-      kernel: sharp.kernel.lanczos3,
-      fastShrinkOnLoad: !isLongStrip,
-    });
-
-    if (isGrayscale) {
-      pipeline = pipeline.grayscale();
-    }
-
-    // ضغط JPEG قياسي فائق السرعة يوفر الباقة بدون تعليق المعالج
-    const compressedBuffer = await pipeline
-      .jpeg({
-        quality,
-        chromaSubsampling: quality < 50 ? '4:2:0' : '4:4:4',
-      })
-      .toBuffer();
-
-    if (!isGrayscale && compressedBuffer.length >= responseBuffer.length) {
-      res.set({
-        'Content-Type': contentType || 'application/octet-stream',
-        'Content-Length': responseBuffer.length,
-        'Cache-Control': 'public, max-age=31536000, immutable',
+    // 📊 فاحص السرعة: إذا أضفت &debug=1&info=1 يعرض لك سرعة السيرفر والكود بالملي ثانية!
+    if (isDebugMode && req.query.info === '1') {
+      return res.status(200).json({
+        verdict:
+          totalServerTimeMs < 1200
+            ? '🚀 السيرفر والكود سريعان جداً! البطء من سرعة الإنترنت (3G) في الجوال'
+            : '🐢 هناك بطء من الموقع الأصلي أثناء سحب الصورة',
+        fetchTimeMs: `${fetchTimeMs} ms (وقت سحب الصورة من الموقع)`,
+        sharpTimeMs: `${sharpTimeMs} ms (وقت ضغط الكود للصورة)`,
+        totalServerTimeMs: `${totalServerTimeMs} ms (إجمالي وقت السيرفر)`,
+        sourceSizeKB: `${Math.round(responseBuffer.length / 1024)} KB`,
+        finalSizeKB: `${Math.round(finalBuffer.length / 1024)} KB (الحجم المرسل لجوالك)`,
+        appliedQuality: `${quality}%`,
+        winnerUrl: winner.candidateUrl,
       });
-      return res.status(200).send(responseBuffer);
     }
 
     res.set({
-      'Content-Type': 'image/jpeg',
-      'Content-Length': compressedBuffer.length,
+      'Content-Type': finalContentType,
+      'Content-Length': finalBuffer.length,
       'Cache-Control': 'public, max-age=31536000, immutable',
+      'Server-Timing': `fetch;dur=${fetchTimeMs}, sharp;dur=${sharpTimeMs}, total;dur=${totalServerTimeMs}`,
     });
 
-    return res.status(200).send(compressedBuffer);
+    return res.status(200).send(finalBuffer);
   } catch (aggregateError) {
     controllers.forEach((ctrl) => ctrl.abort());
     const errors = aggregateError.errors || [aggregateError];
 
     if (isDebugMode) {
       return res.status(502).json({
-        proxyVersion: 'v4.6-FastOptimized',
+        proxyVersion: 'v4.8-UltraFast',
         requestedUrl: imageUrl,
-        totalAttempts: candidateUrls.length,
         failedAttemptsDetails: errors.map((e) => e.details || { message: e.message }),
       });
     }
