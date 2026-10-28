@@ -4,7 +4,6 @@ const sharp = require('sharp');
 const http = require('http');
 const https = require('https');
 
-// تقليل استهلاك الذاكرة وتوزيع خيوط المعالج في Vercel لمنع التهنيج عند طلب عدة صور معاً
 sharp.cache(false);
 sharp.concurrency(2);
 
@@ -12,17 +11,16 @@ const app = express();
 
 // ============================================================================
 // ⚙️ إعدادات الدقة المخصصة لتوفير الباقة (عدّل الأرقام على اليمين كما تحب)
-// اليسار = الرقم الذي تختاره في التطبيق | اليمين = الدقة الفعلية التي ينفذها السيرفر
 // ============================================================================
 const QUALITY_MAP = {
-  10: 10,  // 10% في التطبيق -> 10% في السيرفر
-  20: 15,  // 20% في التطبيق -> 15% في السيرفر
-  40: 30,  // 40% في التطبيق -> 30% في السيرفر
-  50: 40,  // 50% في التطبيق -> 40% في السيرفر
-  70: 55,  // 70% في التطبيق -> 55% في السيرفر
-  80: 65,  // 80% في التطبيق -> 65% في السيرفر
-  90: 75,  // 90% في التطبيق -> 75% في السيرفر
-  95: 45,  // 95% في التطبيق -> 45% مع إجبار الضغط لكل الصور
+  10: 10,
+  20: 15,  // 20% في التطبيق -> 15% في السيرفر (كما طلبت)
+  40: 30,
+  50: 40,
+  70: 55,
+  80: 65,
+  90: 75,
+  95: 45,
 };
 
 const DEFAULT_QUALITY = 30;
@@ -37,7 +35,7 @@ const httpsAgent = new https.Agent({
 });
 
 const axiosInstance = axios.create({
-  timeout: 5000,
+  timeout: 6000,
   responseType: 'arraybuffer',
   httpAgent,
   httpsAgent,
@@ -93,9 +91,6 @@ function sendTextError(res, error, extraDebug = '') {
   return res.status(info.httpStatus).send(`${info.code}: ${rawMessage}`);
 }
 
-/*
- * اختيار أسرع 3 روابط فقط بدلاً من 8 لمنع اختناق السيرفر عند فتح الفصول في التطبيق
- */
 function buildCandidateImageUrls(imageUrl) {
   const candidates = [];
   const add = (value) => {
@@ -127,11 +122,12 @@ function buildCandidateImageUrls(imageUrl) {
 
       const nextImg = `https://meshmanga.com/_next/image?url=${encodeURIComponent(repairedDirectUrl)}&w=1920&q=80`;
 
-      // أسرع 3 منافذ مضمونة لسوات مانجا بدون إغراق السيرفر بطلبات زائدة
+      // الروابط الأسرع والأقوى لسوات مانجا
       add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(cleanTargetUrl)}`);
       add(`https://wsrv.nl/?url=${encodeURIComponent(cleanTargetUrl)}`);
       add(`https://images1-focus-opensocial.googleusercontent.com/gadgets/proxy?container=focus&refresh=2592000&url=${encodeURIComponent(nextImg)}`);
-      add(`https://i0.wp.com/meshmanga.com${sourceUrl.pathname}`);
+      add(nextImg);
+      add(cleanTargetUrl);
 
       return candidates;
     }
@@ -214,7 +210,7 @@ async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, signa
   try {
     const res = await axiosInstance.get(candidateUrl, {
       headers: currentHeaders,
-      signal, // إيقاف التحميل فوراً إذا فاز رابط آخر
+      signal,
     });
 
     const contentType = String(res.headers['content-type'] || '')
@@ -225,17 +221,11 @@ async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, signa
     const buffer = Buffer.isBuffer(res.data) ? res.data : Buffer.from(res.data || '');
 
     if (res.status < 200 || res.status >= 300) {
-      throw new UpstreamError(`HTTP ${res.status}`, res.status, {
-        candidateUrl,
-        status: res.status,
-      });
+      throw new UpstreamError(`HTTP ${res.status}`, res.status, { candidateUrl, status: res.status });
     }
 
     if (buffer.length < 100 || contentType.includes('text/html')) {
-      throw new UpstreamError('Invalid payload', res.status, {
-        candidateUrl,
-        status: res.status,
-      });
+      throw new UpstreamError('Invalid payload', res.status, { candidateUrl, status: res.status });
     }
 
     const metadata = await sharp(buffer, {
@@ -244,18 +234,13 @@ async function fetchValidImage(candidateUrl, baseHeaders, upstreamReferer, signa
     }).metadata();
 
     if (!metadata.format) {
-      throw new UpstreamError('Unsupported format', res.status, {
-        candidateUrl,
-      });
+      throw new UpstreamError('Unsupported format', res.status, { candidateUrl });
     }
 
     return { buffer, contentType, metadata, candidateUrl };
   } catch (err) {
     if (err instanceof UpstreamError) throw err;
-    throw new UpstreamError(err.message || 'Network Error', 0, {
-      candidateUrl,
-      message: err.message,
-    });
+    throw new UpstreamError(err.message || 'Network Error', 0, { candidateUrl, message: err.message });
   }
 }
 
@@ -264,7 +249,7 @@ app.get('/', async (req, res) => {
   const isDebugMode = req.query.debug === '1' || req.query.debug === 'true';
 
   if (!imageUrl) {
-    return res.status(200).send('v5.0-TurboSpeed-Active');
+    return res.status(200).send('v5.1-FastAndAnti403-Active');
   }
 
   if (typeof imageUrl !== 'string') {
@@ -282,7 +267,6 @@ app.get('/', async (req, res) => {
   }
 
   const candidateUrls = buildCandidateImageUrls(imageUrl);
-  // أداة إلغاء الطلبات المتبقية بمجرد فوز أول رابط
   const controllers = candidateUrls.map(() => new AbortController());
 
   try {
@@ -292,10 +276,10 @@ app.get('/', async (req, res) => {
         ? req.query.referer
         : process.env.UPSTREAM_REFERER || defaultReferer;
 
-    // تثبيت User-Agent الخاص بمتصفح كروم دائماً (لأنه في المتصفح كان سريعاً جداً معك)
+    // الهيدرز الأصلية الآمنة تماماً لتجاوز خطأ 403
     const baseHeaders = {
       'User-Agent':
-        'Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Mobile Safari/537.36',
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
       Accept:
         'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8',
       'Accept-Language': 'ar,en-US;q=0.9,en;q=0.8',
@@ -313,7 +297,6 @@ app.get('/', async (req, res) => {
           upstreamReferer,
           controllers[index].signal,
         ).then((result) => {
-          // بمجرد فوز هذا الرابط، ألغِ جميع الروابط الأخرى فوراً لتوفير سرعة السيرفر!
           controllers.forEach((ctrl, i) => {
             if (i !== index) ctrl.abort();
           });
@@ -345,7 +328,6 @@ app.get('/', async (req, res) => {
     const shouldResize = fileSizeInKB > effectiveThresholdKB;
 
     if (forceCompression) {
-      // ضغط سريع جداً (Turbo JPEG) بدون فلاتر mozjpeg التي تبطئ المعالج 10 أضعاف
       const forcedBuffer = await sharp(responseBuffer, {
         failOn: 'none',
         limitInputPixels: false,
@@ -408,7 +390,6 @@ app.get('/', async (req, res) => {
       pipeline = pipeline.grayscale();
     }
 
-    // ضغط فوري لا يأخذ أكثر من 0.08 ثانية في السيرفر مع الحفاظ على صغر الحجم
     const compressedBuffer = await pipeline
       .jpeg({
         quality,
@@ -438,7 +419,7 @@ app.get('/', async (req, res) => {
 
     if (isDebugMode) {
       return res.status(502).json({
-        proxyVersion: 'v5.0-TurboSpeed',
+        proxyVersion: 'v5.1-FastAndAnti403',
         requestedUrl: imageUrl,
         failedAttemptsDetails: errors.map((e) => e.details || { message: e.message }),
       });
